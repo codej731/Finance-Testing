@@ -423,8 +423,15 @@ def _quarters_in(days: int) -> int | None:
     return n if 1 <= n <= 4 and abs(days - n * QUARTER_DAYS) <= 20 else None
 
 
-def _edgar_facts(companyfacts: dict, tag: str, unit_kind: str) -> pd.DataFrame:
-    """All facts for one 'taxonomy:Tag' in the relevant unit, original filings only."""
+def _iso(value: str | None) -> date | None:
+    return date.fromisoformat(value[:10]) if value else None
+
+
+def _edgar_facts(companyfacts: dict, tag: str, unit_kind: str) -> list[dict]:
+    """All facts for one 'taxonomy:Tag' in the relevant unit, original filings only.
+
+    Plain Python rather than pandas: there are thousands of small lists per
+    filer and DataFrame overhead dominated the run time."""
     taxonomy, name = tag.split(":", 1)
     units = _get(companyfacts, "facts", taxonomy, name, "units") or {}
     if unit_kind == "shares":
@@ -433,23 +440,24 @@ def _edgar_facts(companyfacts: dict, tag: str, unit_kind: str) -> pd.DataFrame:
         monetary = [u for u in units if "/" not in u and u != "shares" and u != "pure"]
         unit = "USD" if "USD" in monetary else (monetary[0] if monetary else None)
     if unit is None:
-        return pd.DataFrame()
-    df = pd.DataFrame(units[unit])
-    if df.empty:
-        return df
+        return []
     # A filing cannot report actuals for a period ending after it was filed;
     # such facts are assumptions (e.g. a 2027 health-care cost trend rate).
-    df = df[df["form"].isin(EDGAR_FORMS) & (df["end"] <= df["filed"])].copy()
-    if "start" not in df.columns:
-        df["start"] = None
-    df["unit"] = unit
-    df["end"] = pd.to_datetime(df["end"]).dt.date
-    df["start"] = pd.to_datetime(df["start"]).dt.date
-    df["filed"] = pd.to_datetime(df["filed"]).dt.date
-    # Point-in-time: keep the first filing of each period (later filings
-    # repeat it as a comparative, or restate it).
-    df = df.sort_values("filed", kind="stable")
-    return df.drop_duplicates(["start", "end"], keep="first").reset_index(drop=True)
+    rows = [f for f in units[unit] if f.get("form") in EDGAR_FORMS
+            and f["end"] <= f.get("filed", "")]
+    # Point-in-time: keep the first filing of each period (later filings repeat
+    # it as a comparative, or restate it). sort() is stable, like the original.
+    rows.sort(key=lambda f: f["filed"])
+    seen: set = set()
+    out = []
+    for f in rows:
+        key = (f.get("start"), f["end"])
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"start": _iso(f.get("start")), "end": _iso(f["end"]), "val": f["val"],
+                    "filed": _iso(f["filed"]), "accn": f.get("accn"), "unit": unit})
+    return out
 
 
 def _edgar_calendar(companyfacts: dict) -> tuple[set[date], set[date], dict[str, date]]:
@@ -463,7 +471,7 @@ def _edgar_calendar(companyfacts: dict) -> tuple[set[date], set[date], dict[str,
                 if (f.get("form") not in EDGAR_FORMS or not f.get("start")
                         or f["end"] > f.get("filed", "")):
                     continue
-                start, end = _date(f["start"]), _date(f["end"])
+                start, end = _iso(f["start"]), _iso(f["end"])
                 n = _quarters_in((end - start).days)
                 if n is None:
                     continue
@@ -476,112 +484,113 @@ def _edgar_calendar(companyfacts: dict) -> tuple[set[date], set[date], dict[str,
     return fy_ends, period_ends, accn_end
 
 
+Series = dict  # (period_type, period_end) -> (value, filed, unit)
+
+
 def _edgar_tag_series(companyfacts: dict, tag: str, field: str, fy_ends: set[date],
-                      period_ends: set[date], accn_end: dict[str, date]) -> pd.DataFrame:
-    """One tag → rows of (period_type, period_end, value, filed, unit)."""
+                      period_ends: set[date], accn_end: dict[str, date]) -> Series:
+    """One tag → {(period_type, period_end): (value, filed, unit)}; first entry wins."""
     f = FIELDS[field]
     facts = _edgar_facts(companyfacts, tag, f.unit)
-    out = []
-    if facts.empty:
-        return pd.DataFrame(columns=["period_type", "period_end", "value", "filed", "unit"])
+    out: Series = {}
+
+    def add(ptype: str, end: date, value: float, filed: date, unit: str) -> None:
+        out.setdefault((ptype, end), (value, filed, unit))
 
     if tag.startswith("dei:"):
         # Cover-page values are dated at the cover date; attach to the report period.
-        for r in facts.itertuples():
-            pend = accn_end.get(r.accn)
+        for r in facts:
+            pend = accn_end.get(r["accn"])
             if pend is None:
                 continue
-            out.append(("Q", pend, r.val, r.filed, r.unit))
+            add("Q", pend, r["val"], r["filed"], r["unit"])
             if pend in fy_ends:
-                out.append(("FY", pend, r.val, r.filed, r.unit))
+                add("FY", pend, r["val"], r["filed"], r["unit"])
     elif f.kind == "stock":
-        for r in facts[facts["start"].isna()].itertuples():
-            if r.end not in period_ends:
-                continue
-            out.append(("Q", r.end, r.val, r.filed, r.unit))
-            if r.end in fy_ends:
-                out.append(("FY", r.end, r.val, r.filed, r.unit))
+        for r in facts:
+            if r["start"] is None and r["end"] in period_ends:
+                add("Q", r["end"], r["val"], r["filed"], r["unit"])
+                if r["end"] in fy_ends:
+                    add("FY", r["end"], r["val"], r["filed"], r["unit"])
     else:
-        durations = facts[facts["start"].notna()].copy()
-        durations["n"] = [_quarters_in((e - s).days) for s, e in
-                          zip(durations["start"], durations["end"])]
-        durations = durations[durations["n"].notna()]
+        durations = []
+        for r in facts:
+            if r["start"] is not None:
+                n = _quarters_in((r["end"] - r["start"]).days)
+                if n is not None:
+                    durations.append((n, r))
         direct_q = set()
-        for r in durations.itertuples():
-            if r.n == 1:
-                out.append(("Q", r.end, r.val, r.filed, r.unit))
-                direct_q.add(r.end)
-            elif r.n == 4:
-                out.append(("FY", r.end, r.val, r.filed, r.unit))
+        for n, r in durations:
+            if n == 1:
+                add("Q", r["end"], r["val"], r["filed"], r["unit"])
+                direct_q.add(r["end"])
+            elif n == 4:
+                add("FY", r["end"], r["val"], r["filed"], r["unit"])
         # 10-Q cash flows (and Q4 everywhere) are only reported year-to-date:
         # derive the discrete quarter as the difference of consecutive YTD values.
         # Averages (share counts) cannot be differenced.
         if f.unit == "currency":
-            for _, ytd in durations.groupby("start"):
-                by_n = {int(r.n): r for r in ytd.itertuples()}
+            by_start: dict[date, dict[int, dict]] = {}
+            for n, r in durations:
+                by_start.setdefault(r["start"], {})[n] = r
+            for by_n in by_start.values():
                 for n in (2, 3, 4):
                     cur, prev = by_n.get(n), by_n.get(n - 1)
-                    if cur is None or prev is None or cur.end in direct_q:
+                    if cur is None or prev is None or cur["end"] in direct_q:
                         continue
-                    out.append(("Q", cur.end, cur.val - prev.val,
-                                max(cur.filed, prev.filed), cur.unit))
-                    direct_q.add(cur.end)
-    return (pd.DataFrame(out, columns=["period_type", "period_end", "value", "filed", "unit"])
-            .drop_duplicates(["period_type", "period_end"], keep="first"))
+                    add("Q", cur["end"], cur["val"] - prev["val"],
+                        max(cur["filed"], prev["filed"]), cur["unit"])
+                    direct_q.add(cur["end"])
+    return out
 
 
-def _edgar_combine(parts: list[tuple[pd.DataFrame, bool, int]]) -> pd.DataFrame | None:
+def _edgar_combine(parts: list[tuple[Series, bool, int]]) -> Series | None:
     """Sum (or subtract, sign −1) tag series period by period. Required parts must
     all be present for a period; optional parts are applied where reported."""
     required = [p for p, optional, _ in parts if not optional]
-    if any(p.empty for p in required):
+    if any(not p for p in required):
         return None
     if required:
-        index = required[0].index
+        keys = set(required[0])
         for p in required[1:]:
-            index = index.intersection(p.index)
+            keys &= set(p)
     else:
-        index = parts[0][0].index
-        for p, _, _ in parts[1:]:
-            index = index.union(p.index)
-    if index.empty:
-        return None
-    frames = [p.reindex(index) for p, _, _ in parts]
-    signed = [f["value"] * sign for f, (_, _, sign) in zip(frames, parts)]
-    return pd.DataFrame({
-        "value": pd.concat(signed, axis=1).sum(axis=1, min_count=1),
-        "filed": pd.concat([pd.to_datetime(f["filed"]) for f in frames], axis=1)
-                   .max(axis=1).dt.date,
-        "unit": pd.concat([f["unit"] for f in frames], axis=1).bfill(axis=1).iloc[:, 0],
-    }, index=index)
+        keys = set().union(*(p for p, _, _ in parts))
+    out: Series = {}
+    for key in keys:
+        total, filed, unit = 0.0, None, None
+        for series, _, sign in parts:
+            hit = series.get(key)
+            if hit is None:
+                continue
+            total += sign * hit[0]
+            filed = hit[1] if filed is None else max(filed, hit[1])
+            unit = unit or hit[2]
+        out[key] = (total, filed, unit)
+    return out or None
 
 
 def normalize_edgar_companyfacts(companyfacts: dict, security_id: str,
                                  retrieved_at: datetime) -> pd.DataFrame:
     """companyfacts JSON → canonical long rows with actual filing dates."""
     fy_ends, period_ends, accn_end = _edgar_calendar(companyfacts)
-    frames = []
+    rows = []
     for name, f in FIELDS.items():
-        alt_frames = []
-        for rank, alternative in enumerate(f.xbrl):
+        best: Series = {}
+        # Issuers switch tags over time, so priority is resolved per period:
+        # an earlier alternative wins wherever it has a value.
+        for alternative in f.xbrl:
             combined = _edgar_combine(
-                [(_edgar_tag_series(companyfacts, tag, name, fy_ends, period_ends, accn_end)
-                  .set_index(["period_type", "period_end"]), optional, sign)
-                 for tag, optional, sign in map(parse_component, alternative)])
-            if combined is None:
-                continue
-            combined["rank"] = rank
-            alt_frames.append(combined.reset_index())
-        if not alt_frames:
-            continue
-        # Issuers switch tags over time, so priority is resolved per period.
-        best = (pd.concat(alt_frames).sort_values("rank", kind="stable")
-                .drop_duplicates(["period_type", "period_end"], keep="first"))
-        best["field"] = name
-        frames.append(best)
-    if not frames:
+                [(_edgar_tag_series(companyfacts, tag, name, fy_ends, period_ends, accn_end),
+                  optional, sign) for tag, optional, sign in map(parse_component, alternative)])
+            for key, hit in (combined or {}).items():
+                best.setdefault(key, hit)
+        rows.extend((name, ptype, pend, value, filed, unit)
+                    for (ptype, pend), (value, filed, unit) in best.items())
+    if not rows:
         return _empty_fundamentals()
-    df = pd.concat(frames, ignore_index=True)
+    df = pd.DataFrame(rows, columns=["field", "period_type", "period_end", "value", "filed",
+                                     "unit"])
     reporting_ccy = (df.loc[df["unit"] != "shares", "unit"].mode().iat[0]
                      if (df["unit"] != "shares").any() else None)
     return pd.DataFrame({
