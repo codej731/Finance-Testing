@@ -28,7 +28,7 @@
 |---|---|---|
 | `security_id` | TEXT PK | Internal stable ID, e.g. `XTSE:RUS`, `XNAS:AAPL` |
 | `ticker` | TEXT | Exchange-native symbol (`RUS`, `BAM.A`) |
-| `yahoo_symbol` | TEXT | `RUS.TO`, `BAM-A.TO`, `AAPL` |
+| `yahoo_symbol` | TEXT | `RUS.TO`, `CCL-B.TO`, `AAPL` |
 | `exchange` | TEXT | `TSX`, `TSXV`, `NASDAQ`, `NYSE`, … |
 | `cik` | TEXT NULL | SEC CIK for EDGAR lookups (US filers) |
 | `name` | TEXT | |
@@ -151,7 +151,7 @@ Every output row traces back to the exact data, config, and code that produced i
 
 ## 3. Canonical field dictionary
 
-yfinance uses the same names as yahooquery with spaces (`TotalRevenue` → `Total Revenue`). XBRL tags are the common `us-gaap` candidates, listed in priority order — **cross-check against the existing EDGAR normalizer** before relying on them, since issuers vary.
+yfinance uses the same names as yahooquery with spaces (`TotalRevenue` → `Total Revenue`). XBRL tags are the common `us-gaap` candidates. `→` separates alternatives in priority order (resolved per period); `+` sums components, which must all be present unless marked `?` (optional: added when reported). Cash and debt mappings were checked against AAPL and MSFT 10-K figures on the first live run (2026-10-17): `us-gaap:LongTermDebt` already includes the current portion and `DebtCurrent` already includes short-term borrowings, so they are never summed together, and Yahoo's `TotalDebt` includes finance-lease liabilities for some issuers, so `CurrentDebt + LongTermDebt` is preferred.
 
 ### Income statement
 | Field | Definition | yahooquery | XBRL (us-gaap) |
@@ -172,7 +172,7 @@ yfinance uses the same names as yahooquery with spaces (`TotalRevenue` → `Tota
 |---|---|---|---|
 | `total_assets` | | `TotalAssets` | `Assets` |
 | `current_assets` | | `CurrentAssets` | `AssetsCurrent` |
-| `cash` | Cash + short-term investments | `CashCashEquivalentsAndShortTermInvestments` → `CashAndCashEquivalents` | `CashCashEquivalentsAndShortTermInvestments` → `CashAndCashEquivalentsAtCarryingValue` |
+| `cash` | Cash + short-term investments | `CashCashEquivalentsAndShortTermInvestments` → `CashAndCashEquivalents` | `CashCashEquivalentsAndShortTermInvestments` → `CashAndCashEquivalentsAtCarryingValue` + ?`ShortTermInvestments` + ?`MarketableSecuritiesCurrent` + ?`AvailableForSaleSecuritiesDebtSecuritiesCurrent` |
 | `receivables` | | `AccountsReceivable` | `AccountsReceivableNetCurrent` |
 | `inventory` | | `Inventory` | `InventoryNet` |
 | `net_ppe` | | `NetPPE` | `PropertyPlantAndEquipmentNet` |
@@ -180,7 +180,7 @@ yfinance uses the same names as yahooquery with spaces (`TotalRevenue` → `Tota
 | `current_liabilities` | | `CurrentLiabilities` | `LiabilitiesCurrent` |
 | `payables` | | `AccountsPayable` | `AccountsPayableCurrent` |
 | `total_liabilities` | | `TotalLiabilitiesNetMinorityInterest` | `Liabilities` |
-| `total_debt` | Short + long-term debt; leases per config | `TotalDebt` | `LongTermDebt` + `DebtCurrent` (or `LongTermDebtNoncurrent` + `LongTermDebtCurrent`) |
+| `total_debt` | Short + long-term debt, **excluding leases** (§8) | ?`CurrentDebt` + ?`LongTermDebt` → `TotalDebt` | `LongTermDebtNoncurrent` + `DebtCurrent` → `LongTermDebtNoncurrent` + `LongTermDebtCurrent` + ?`CommercialPaper` + ?`ShortTermBorrowings` → `LongTermDebt` + ?`CommercialPaper` + ?`ShortTermBorrowings` |
 | `minority_interest` | | `MinorityInterest` | `MinorityInterest` |
 | `total_equity` | Common shareholders' equity | `StockholdersEquity` | `StockholdersEquity` |
 | `retained_earnings` | Signed | `RetainedEarnings` | `RetainedEarningsAccumulatedDeficit` |

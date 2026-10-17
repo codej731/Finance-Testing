@@ -75,6 +75,11 @@ def test_edgar_summed_alternative_requires_all_components(edgar):
     assert debt["value"].iat[0] == 250
 
 
+def test_edgar_cash_adds_optional_marketable_securities(edgar):
+    assert _value(edgar, "cash", "FY", "2024-09-30")["value"] == 140
+    assert _value(edgar, "cash", "Q", "2023-12-31")["value"] == 90
+
+
 def test_edgar_cover_page_shares_attach_to_report_period(edgar):
     fy = _value(edgar, "shares_outstanding", "FY", "2024-09-30")
     assert fy["value"] == 1_000_000 and fy["currency"] == "USD"
@@ -97,6 +102,13 @@ def test_yahoo_statements():
     assert capex["available_date_estimated"]
     assert _value(df, "revenue", "Q", "2024-09-30")["available_date"] == date(2024, 11, 29)
     assert (df["currency"] == "CAD").all()
+
+
+def test_yahoo_total_debt_excludes_leases():
+    raw = fixtures.yahoo_financials("A", "USD", ["2023-12-31"], [])
+    raw["CurrentDebt"], raw["LongTermDebt"], raw["TotalDebt"] = 2e7, 5e7, 9e7
+    df = normalize_yahoo_statements(raw, {"A": "XNAS:A"}, {"XNAS:A": "US"}, LAGS, NOW)
+    assert _value(df, "total_debt", "FY", "2023-12-31")["value"] == 7e7
 
 
 def test_yahoo_statements_cash_falls_back_to_second_name():
@@ -159,6 +171,12 @@ def test_history_and_splits():
                                               {"A": "XNAS:A"}, {"A": "USD"})
     assert len(prices) == 10 and prices["currency"].eq("USD").all()
     assert list(actions["ratio"]) == [2.0] and actions["action_type"].iat[0] == "split"
+
+
+def test_history_without_splits_column():
+    raw = fixtures.yahoo_history("A").drop(columns="splits")
+    prices, actions = normalize_yahoo_history(raw, {"A": "XNAS:A"}, {"A": "USD"})
+    assert len(prices) == 10 and actions.empty
 
 
 # --- yfinance -------------------------------------------------------------

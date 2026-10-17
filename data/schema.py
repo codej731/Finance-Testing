@@ -28,10 +28,12 @@ class FieldDef:
     # signed: stored as reported.
     sign: Literal["magnitude", "signed"] = "signed"
     unit: Literal["currency", "shares"] = "currency"
-    # yahooquery names in priority order; yfinance uses the same names with spaces.
-    yahoo: tuple[str, ...] = ()
-    # XBRL alternatives in priority order. Each alternative is a tuple of tags
-    # that are summed; all tags in an alternative must be present.
+    # Source mappings: alternatives in priority order. Each alternative is a
+    # tuple of components that are summed. Every component must be present
+    # unless prefixed with "?" (optional: added when reported), and at least
+    # one component must be present. yfinance uses the yahooquery names with
+    # spaces.
+    yahoo: tuple[tuple[str, ...], ...] = ()
     xbrl: tuple[tuple[str, ...], ...] = ()
     description: str = ""
 
@@ -42,93 +44,103 @@ def _alts(*tags: str | tuple[str, ...]) -> tuple[tuple[str, ...], ...]:
 
 FIELDS: dict[str, FieldDef] = {f.name: f for f in [
     # Income statement
-    FieldDef("revenue", "income", "flow", yahoo=("TotalRevenue",),
+    FieldDef("revenue", "income", "flow", yahoo=_alts("TotalRevenue"),
              xbrl=_alts("us-gaap:Revenues",
                         "us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax",
                         "us-gaap:SalesRevenueNet"),
              description="Total revenue"),
-    FieldDef("cost_of_revenue", "income", "flow", yahoo=("CostOfRevenue",),
+    FieldDef("cost_of_revenue", "income", "flow", yahoo=_alts("CostOfRevenue"),
              xbrl=_alts("us-gaap:CostOfRevenue", "us-gaap:CostOfGoodsAndServicesSold")),
-    FieldDef("gross_profit", "income", "flow", yahoo=("GrossProfit",),
+    FieldDef("gross_profit", "income", "flow", yahoo=_alts("GrossProfit"),
              xbrl=_alts("us-gaap:GrossProfit")),
-    FieldDef("operating_income", "income", "flow", yahoo=("OperatingIncome",),
+    FieldDef("operating_income", "income", "flow", yahoo=_alts("OperatingIncome"),
              xbrl=_alts("us-gaap:OperatingIncomeLoss"),
              description="Reported operating income"),
-    FieldDef("ebitda_reported", "income", "flow", yahoo=("EBITDA", "NormalizedEBITDA"),
+    FieldDef("ebitda_reported", "income", "flow", yahoo=_alts("EBITDA", "NormalizedEBITDA"),
              description="Vendor EBITDA, reference only"),
     FieldDef("interest_expense", "income", "flow", sign="magnitude",
-             yahoo=("InterestExpense",),
+             yahoo=_alts("InterestExpense"),
              xbrl=_alts("us-gaap:InterestExpense", "us-gaap:InterestExpenseNonoperating")),
-    FieldDef("pretax_income", "income", "flow", yahoo=("PretaxIncome",),
+    FieldDef("pretax_income", "income", "flow", yahoo=_alts("PretaxIncome"),
              xbrl=_alts("us-gaap:IncomeLossFromContinuingOperationsBeforeIncomeTaxes"
                         "ExtraordinaryItemsNoncontrollingInterest")),
-    FieldDef("income_tax", "income", "flow", yahoo=("TaxProvision",),
+    FieldDef("income_tax", "income", "flow", yahoo=_alts("TaxProvision"),
              xbrl=_alts("us-gaap:IncomeTaxExpenseBenefit")),
-    FieldDef("net_income", "income", "flow", yahoo=("NetIncomeCommonStockholders",),
+    FieldDef("net_income", "income", "flow", yahoo=_alts("NetIncomeCommonStockholders"),
              xbrl=_alts("us-gaap:NetIncomeLossAvailableToCommonStockholdersBasic",
                         "us-gaap:NetIncomeLoss"),
              description="To common shareholders"),
     FieldDef("diluted_shares_avg", "income", "flow", unit="shares",
-             yahoo=("DilutedAverageShares",),
+             yahoo=_alts("DilutedAverageShares"),
              xbrl=_alts("us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding")),
 
     # Balance sheet
-    FieldDef("total_assets", "balance", "stock", yahoo=("TotalAssets",),
+    FieldDef("total_assets", "balance", "stock", yahoo=_alts("TotalAssets"),
              xbrl=_alts("us-gaap:Assets")),
-    FieldDef("current_assets", "balance", "stock", yahoo=("CurrentAssets",),
+    FieldDef("current_assets", "balance", "stock", yahoo=_alts("CurrentAssets"),
              xbrl=_alts("us-gaap:AssetsCurrent")),
     FieldDef("cash", "balance", "stock",
-             yahoo=("CashCashEquivalentsAndShortTermInvestments", "CashAndCashEquivalents"),
+             yahoo=_alts("CashCashEquivalentsAndShortTermInvestments", "CashAndCashEquivalents"),
              xbrl=_alts("us-gaap:CashCashEquivalentsAndShortTermInvestments",
-                        "us-gaap:CashAndCashEquivalentsAtCarryingValue"),
+                        ("us-gaap:CashAndCashEquivalentsAtCarryingValue",
+                         "?us-gaap:ShortTermInvestments",
+                         "?us-gaap:MarketableSecuritiesCurrent",
+                         "?us-gaap:AvailableForSaleSecuritiesDebtSecuritiesCurrent")),
              description="Cash + short-term investments"),
-    FieldDef("receivables", "balance", "stock", yahoo=("AccountsReceivable",),
+    FieldDef("receivables", "balance", "stock", yahoo=_alts("AccountsReceivable"),
              xbrl=_alts("us-gaap:AccountsReceivableNetCurrent")),
-    FieldDef("inventory", "balance", "stock", yahoo=("Inventory",),
+    FieldDef("inventory", "balance", "stock", yahoo=_alts("Inventory"),
              xbrl=_alts("us-gaap:InventoryNet")),
-    FieldDef("net_ppe", "balance", "stock", yahoo=("NetPPE",),
+    FieldDef("net_ppe", "balance", "stock", yahoo=_alts("NetPPE"),
              xbrl=_alts("us-gaap:PropertyPlantAndEquipmentNet")),
     FieldDef("goodwill_intangibles", "balance", "stock",
-             yahoo=("GoodwillAndOtherIntangibleAssets",),
+             yahoo=_alts("GoodwillAndOtherIntangibleAssets"),
              xbrl=_alts(("us-gaap:Goodwill", "us-gaap:IntangibleAssetsNetExcludingGoodwill"))),
-    FieldDef("current_liabilities", "balance", "stock", yahoo=("CurrentLiabilities",),
+    FieldDef("current_liabilities", "balance", "stock", yahoo=_alts("CurrentLiabilities"),
              xbrl=_alts("us-gaap:LiabilitiesCurrent")),
-    FieldDef("payables", "balance", "stock", yahoo=("AccountsPayable",),
+    FieldDef("payables", "balance", "stock", yahoo=_alts("AccountsPayable"),
              xbrl=_alts("us-gaap:AccountsPayableCurrent")),
     FieldDef("total_liabilities", "balance", "stock",
-             yahoo=("TotalLiabilitiesNetMinorityInterest",),
+             yahoo=_alts("TotalLiabilitiesNetMinorityInterest"),
              xbrl=_alts("us-gaap:Liabilities")),
-    FieldDef("total_debt", "balance", "stock", yahoo=("TotalDebt",),
-             xbrl=_alts(("us-gaap:LongTermDebt", "us-gaap:DebtCurrent"),
-                        ("us-gaap:LongTermDebtNoncurrent", "us-gaap:LongTermDebtCurrent")),
-             description="Short + long-term debt; leases per config"),
-    FieldDef("minority_interest", "balance", "stock", yahoo=("MinorityInterest",),
+    # Excludes lease liabilities (config debt.include_leases; schema §8).
+    # us-gaap LongTermDebt already includes the current portion, and DebtCurrent
+    # already includes short-term borrowings.
+    FieldDef("total_debt", "balance", "stock",
+             yahoo=_alts(("?CurrentDebt", "?LongTermDebt"), "TotalDebt"),
+             xbrl=_alts(("us-gaap:LongTermDebtNoncurrent", "us-gaap:DebtCurrent"),
+                        ("us-gaap:LongTermDebtNoncurrent", "us-gaap:LongTermDebtCurrent",
+                         "?us-gaap:CommercialPaper", "?us-gaap:ShortTermBorrowings"),
+                        ("us-gaap:LongTermDebt", "?us-gaap:CommercialPaper",
+                         "?us-gaap:ShortTermBorrowings")),
+             description="Short + long-term debt, excluding leases"),
+    FieldDef("minority_interest", "balance", "stock", yahoo=_alts("MinorityInterest"),
              xbrl=_alts("us-gaap:MinorityInterest")),
-    FieldDef("total_equity", "balance", "stock", yahoo=("StockholdersEquity",),
+    FieldDef("total_equity", "balance", "stock", yahoo=_alts("StockholdersEquity"),
              xbrl=_alts("us-gaap:StockholdersEquity"),
              description="Common shareholders' equity"),
-    FieldDef("retained_earnings", "balance", "stock", yahoo=("RetainedEarnings",),
+    FieldDef("retained_earnings", "balance", "stock", yahoo=_alts("RetainedEarnings"),
              xbrl=_alts("us-gaap:RetainedEarningsAccumulatedDeficit")),
     FieldDef("shares_outstanding", "balance", "stock", unit="shares",
-             yahoo=("OrdinarySharesNumber",),
+             yahoo=_alts("OrdinarySharesNumber"),
              xbrl=_alts("dei:EntityCommonStockSharesOutstanding"),
              description="Period-end shares outstanding"),
 
     # Cash flow statement
-    FieldDef("operating_cash_flow", "cashflow", "flow", yahoo=("OperatingCashFlow",),
+    FieldDef("operating_cash_flow", "cashflow", "flow", yahoo=_alts("OperatingCashFlow"),
              xbrl=_alts("us-gaap:NetCashProvidedByUsedInOperatingActivities")),
-    FieldDef("capex", "cashflow", "flow", sign="magnitude", yahoo=("CapitalExpenditure",),
+    FieldDef("capex", "cashflow", "flow", sign="magnitude", yahoo=_alts("CapitalExpenditure"),
              xbrl=_alts("us-gaap:PaymentsToAcquirePropertyPlantAndEquipment")),
     FieldDef("depreciation_amortization", "cashflow", "flow",
-             yahoo=("DepreciationAndAmortization", "ReconciledDepreciation"),
+             yahoo=_alts("DepreciationAndAmortization", "ReconciledDepreciation"),
              xbrl=_alts("us-gaap:DepreciationDepletionAndAmortization")),
-    FieldDef("sbc", "cashflow", "flow", sign="magnitude", yahoo=("StockBasedCompensation",),
+    FieldDef("sbc", "cashflow", "flow", sign="magnitude", yahoo=_alts("StockBasedCompensation"),
              xbrl=_alts("us-gaap:ShareBasedCompensation")),
     FieldDef("buybacks", "cashflow", "flow", sign="magnitude",
-             yahoo=("RepurchaseOfCapitalStock",),
+             yahoo=_alts("RepurchaseOfCapitalStock"),
              xbrl=_alts("us-gaap:PaymentsForRepurchaseOfCommonStock")),
     FieldDef("dividends_paid", "cashflow", "flow", sign="magnitude",
-             yahoo=("CashDividendsPaid",),
+             yahoo=_alts("CashDividendsPaid"),
              xbrl=_alts("us-gaap:PaymentsOfDividends", "us-gaap:PaymentsOfDividendsCommonStock")),
 ]}
 
@@ -140,6 +152,30 @@ CURRENCY_FIELDS = frozenset(f.name for f in FIELDS.values() if f.unit == "curren
 def yfinance_name(yahoo_name: str) -> str:
     """yahooquery CamelCase → yfinance spaced name: NetPPE → 'Net PPE'."""
     return re.sub(r"(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])", " ", yahoo_name)
+
+
+def parse_component(component: str) -> tuple[str, bool]:
+    """'?us-gaap:CommercialPaper' → ('us-gaap:CommercialPaper', True)."""
+    return (component[1:], True) if component.startswith("?") else (component, False)
+
+
+def resolve_alternatives(lookup, alternatives: tuple[tuple[str, ...], ...]) -> float | None:
+    """First alternative that resolves, given lookup(name) -> float | None."""
+    for alternative in alternatives:
+        total, found = 0.0, False
+        for component in alternative:
+            name, optional = parse_component(component)
+            value = lookup(name)
+            if value is None:
+                if optional:
+                    continue
+                break
+            total += value
+            found = True
+        else:
+            if found:
+                return total
+    return None
 
 
 def apply_sign(field: str, value: float | None) -> float | None:
@@ -169,7 +205,7 @@ CANADIAN_EXCHANGES = frozenset({"TSX", "TSXV", "CBOE_CA", "CSE"})
 
 
 def native_ticker(yahoo_symbol: str) -> str:
-    """RUS.TO → RUS, BAM-A.TO → BAM.A, BRK-B → BRK.B."""
+    """RUS.TO → RUS, CCL-B.TO → CCL.B, BRK-B → BRK.B."""
     base = yahoo_symbol
     for suffix in YAHOO_SUFFIXES:
         if base.upper().endswith(suffix):

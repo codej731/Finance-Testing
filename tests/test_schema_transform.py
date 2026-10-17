@@ -6,7 +6,7 @@ import pytest
 
 from data.ingest import StaticFx
 from data.schema import (FIELDS, TABLES, apply_sign, availability_region, native_ticker,
-                         security_id_for, yfinance_name)
+                         resolve_alternatives, security_id_for, yfinance_name)
 from data.transform import (align_period_ends, build_ttm, convert_currency,
                             fundamentals_panel, infer_fiscal_labels, point_in_time,
                             resolve_sources, to_wide)
@@ -59,6 +59,23 @@ def test_magnitude_fields_are_positive_and_signed_fields_kept():
     assert apply_sign("buybacks", -1.0) == 1.0
     assert apply_sign("net_income", -3.0) == -3.0
     assert apply_sign("capex", None) is None
+
+
+@pytest.mark.parametrize("values,expected", [
+    ({"A": 1, "B": 2, "C": 4}, 3),        # first alternative, optional C not in it
+    ({"A": 1}, 1),                         # B missing → second alternative: A + ?C
+    ({"A": 1, "C": 4}, 5),
+    ({"C": 4}, None),                      # A required in both
+    ({}, None),
+])
+def test_resolve_alternatives(values, expected):
+    alts = (("A", "B"), ("A", "?C"))
+    assert resolve_alternatives(values.get, alts) == expected
+
+
+def test_all_optional_alternative_needs_one_value():
+    assert resolve_alternatives({}.get, (("?A", "?B"),)) is None
+    assert resolve_alternatives({"B": 2}.get, (("?A", "?B"),)) == 2
 
 
 def test_every_field_has_a_source_mapping():

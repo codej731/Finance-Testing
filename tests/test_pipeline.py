@@ -44,7 +44,12 @@ class FakeYahoo:
         df = pd.concat([frames[s] for s in symbols if s in frames])
         return df[df["periodType"].isin([want, "TTM"])]
 
-    def history(self, symbols, period):
+    def history(self, symbols, period, interval="1d"):
+        if interval != "1d":  # long-range monthly bars: one old split for TST
+            df = fixtures.yahoo_history("TST", days=3)
+            df["date"] = pd.to_datetime(["2014-06-01", "2014-07-01", "2014-08-01"])
+            df.loc[0, "splits"] = 7.0
+            return df
         return pd.concat([fixtures.yahoo_history(s, split_on=2 if s == "MINR.TO" else None)
                           for s in symbols])
 
@@ -108,7 +113,9 @@ def test_full_run(cfg, tmp_path):
     assert len(ttm_later) == 1
 
     assert len(store.read("prices_daily")) == 30
-    assert len(store.read("corporate_actions")) == 1
+    actions = store.read("corporate_actions").sort_values("date")
+    assert list(zip(actions["security_id"], actions["ratio"])) == [("XNAS:TST", 7.0),
+                                                                    ("XTSE:MINR", 2.0)]
     assert len(store.read("market_snapshot", "run_id = ?", [result.run_id])) == 3
     assert len(store.read("estimates_snapshot")) == 3
 

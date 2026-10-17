@@ -19,7 +19,8 @@ from typing import Any, Callable, Iterable
 import numpy as np
 import pandas as pd
 
-from data.schema import FIELDS, TABLES, apply_sign, exchange_for, native_ticker, yfinance_name
+from data.schema import (FIELDS, TABLES, apply_sign, exchange_for, native_ticker,
+                         parse_component, resolve_alternatives, yfinance_name)
 from data.transform import estimated_available_date
 
 FUNDAMENTAL_COLUMNS = TABLES["fundamentals"].column_names
@@ -264,8 +265,7 @@ def normalize_yahoo_statements(frame: pd.DataFrame, security_ids: dict[str, str]
         period_end = _date(rec.get("asOfDate"))
         available = estimated_available_date(period_end, period_type, regions[sid], lags)
         for name, f in FIELDS.items():
-            value = next((_num(rec.get(y)) for y in f.yahoo if _num(rec.get(y)) is not None),
-                         None)
+            value = resolve_alternatives(lambda y: _num(rec.get(y)), f.yahoo)
             if value is None:
                 continue
             rows.append((sid, name, period_type, period_end, None, None,
@@ -298,13 +298,22 @@ def normalize_yahoo_history(frame: pd.DataFrame, security_ids: dict[str, str],
     prices = df[TABLES["prices_daily"].column_names].copy()
     prices["volume"] = prices["volume"].astype("Int64")
 
-    splits = df[df.get("splits", pd.Series(0, index=df.index)).fillna(0) > 0]
-    actions = pd.DataFrame({
-        "security_id": splits["security_id"], "date": splits["date"],
+    return prices.reset_index(drop=True), normalize_yahoo_splits(df, security_ids)
+
+
+def normalize_yahoo_splits(frame: pd.DataFrame, security_ids: dict[str, str]) -> pd.DataFrame:
+    """Split events from any yahooquery history frame → corporate_actions rows.
+    With interval > 1d the date is the start of the bar containing the split."""
+    columns = TABLES["corporate_actions"].column_names
+    if frame.empty or "splits" not in frame.columns:
+        return pd.DataFrame(columns=columns)
+    splits = frame[(frame["splits"].fillna(0) > 0) & frame["symbol"].isin(security_ids)]
+    return pd.DataFrame({
+        "security_id": splits["symbol"].map(security_ids),
+        "date": pd.to_datetime(splits["date"], utc=True).dt.date,
         "action_type": "split", "ratio": splits["splits"].astype(float),
         "source": "yahooquery",
-    }, columns=TABLES["corporate_actions"].column_names)
-    return prices.reset_index(drop=True), actions.reset_index(drop=True)
+    }, columns=columns).reset_index(drop=True)
 
 
 # ---------------------------------------------------------------------------
@@ -325,14 +334,12 @@ def normalize_yfinance_statements(statements: dict[str, list[pd.DataFrame]], sec
         for col in merged.columns:
             period_end = _date(col)
             available = estimated_available_date(period_end, period_type, region, lags)
+            def lookup(y: str, col=col) -> float | None:
+                label = yfinance_name(y)
+                return _num(merged.at[label, col]) if label in merged.index else None
+
             for name, f in FIELDS.items():
-                value = None
-                for y in f.yahoo:
-                    label = yfinance_name(y)
-                    if label in merged.index:
-                        value = _num(merged.at[label, col])
-                        if value is not None:
-                            break
+                value = resolve_alternatives(lookup, f.yahoo)
                 if value is None:
                     continue
                 rows.append((security_id, name, period_type, period_end, None, None,
@@ -462,6 +469,31 @@ def _edgar_tag_series(companyfacts: dict, tag: str, field: str, fy_ends: set[dat
             .drop_duplicates(["period_type", "period_end"], keep="first"))
 
 
+def _edgar_combine(parts: list[tuple[pd.DataFrame, bool]]) -> pd.DataFrame | None:
+    """Sum tag series period by period. Required parts must all be present for a
+    period; optional parts are added where reported."""
+    required = [p for p, optional in parts if not optional]
+    if any(p.empty for p in required):
+        return None
+    if required:
+        index = required[0].index
+        for p in required[1:]:
+            index = index.intersection(p.index)
+    else:
+        index = parts[0][0].index
+        for p, _ in parts[1:]:
+            index = index.union(p.index)
+    if index.empty:
+        return None
+    frames = [p.reindex(index) for p, _ in parts]
+    return pd.DataFrame({
+        "value": pd.concat([f["value"] for f in frames], axis=1).sum(axis=1, min_count=1),
+        "filed": pd.concat([pd.to_datetime(f["filed"]) for f in frames], axis=1)
+                   .max(axis=1).dt.date,
+        "unit": pd.concat([f["unit"] for f in frames], axis=1).bfill(axis=1).iloc[:, 0],
+    }, index=index)
+
+
 def normalize_edgar_companyfacts(companyfacts: dict, security_id: str,
                                  retrieved_at: datetime) -> pd.DataFrame:
     """companyfacts JSON → canonical long rows with actual filing dates."""
@@ -470,16 +502,12 @@ def normalize_edgar_companyfacts(companyfacts: dict, security_id: str,
     for name, f in FIELDS.items():
         alt_frames = []
         for rank, alternative in enumerate(f.xbrl):
-            parts = [_edgar_tag_series(companyfacts, tag, name, fy_ends, period_ends, accn_end)
-                     .set_index(["period_type", "period_end"]) for tag in alternative]
-            if any(p.empty for p in parts):
+            combined = _edgar_combine(
+                [(_edgar_tag_series(companyfacts, tag, name, fy_ends, period_ends, accn_end)
+                  .set_index(["period_type", "period_end"]), optional)
+                 for tag, optional in map(parse_component, alternative)])
+            if combined is None:
                 continue
-            combined = parts[0][["value", "filed", "unit"]].copy()
-            for p in parts[1:]:  # every component must be present
-                combined = combined.join(p[["value", "filed"]], how="inner", rsuffix="_r")
-                combined["value"] = combined["value"] + combined["value_r"]
-                combined["filed"] = combined[["filed", "filed_r"]].max(axis=1)
-                combined = combined.drop(columns=["value_r", "filed_r"])
             combined["rank"] = rank
             alt_frames.append(combined.reset_index())
         if not alt_frames:
@@ -546,18 +574,18 @@ class YahooQueryClient:
         frames = [f for f in frames if not f.empty]
         return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
-    def history(self, symbols: list[str], period: str) -> pd.DataFrame:
+    def history(self, symbols: list[str], period: str, interval: str = "1d") -> pd.DataFrame:
         from yahooquery import Ticker
 
         def fetch(batch: list[str]) -> pd.DataFrame:
-            df = Ticker(batch, asynchronous=True).history(period=period, interval="1d")
+            df = Ticker(batch, asynchronous=True).history(period=period, interval=interval)
             if not isinstance(df, pd.DataFrame) or df.empty:
                 return pd.DataFrame()
             df = df.reset_index()
             df["date"] = pd.to_datetime(df["date"].astype(str).str[:10])
             return df
 
-        frames = [self.cache.fetch("yahooquery", f"history_{period}_{_digest(b)}",
+        frames = [self.cache.fetch("yahooquery", f"history_{period}_{interval}_{_digest(b)}",
                                    lambda b=b: fetch(b), kind="frame")
                   for b in _chunks(symbols, self.batch_size)]
         frames = [f for f in frames if not f.empty]

@@ -45,9 +45,12 @@ canonical schema:
 - **Tag priority is per period.** Issuers change tags over time (e.g.
   `SalesRevenueNet` → `RevenueFromContractWithCustomer…`). The first listed
   alternative that has a value *for that period* is used.
-- **Summed alternatives need every component.** `total_debt` and
-  `goodwill_intangibles` are sums of tags; if a component is missing the
-  alternative is skipped rather than treating the gap as zero (D-006).
+- **Summed alternatives need every required component.** `cash`,
+  `total_debt` and `goodwill_intangibles` are sums of tags; if a required
+  component is missing the alternative is skipped rather than treating the gap
+  as zero (D-006). Components marked optional (`?` in `schema.py`, e.g.
+  commercial paper, marketable securities) are added only when reported,
+  because companies without them simply don't file the tag.
 - **Balance-sheet instants** are kept only on report period ends, tagged `Q`
   for every period end and additionally `FY` on fiscal year-ends.
 - **Cover-page shares** (`dei:EntityCommonStockSharesOutstanding`) are dated
@@ -61,6 +64,9 @@ canonical schema:
   `dividends_paid`, `interest_expense`, `sbc`) are `abs()` of the vendor value.
 - `available_date` = `period_end` + the configured lag for the listing
   exchange (`availability_lag_days`) and is flagged as estimated.
+- Splits come from daily bars (exact dates) plus monthly bars over the full
+  history (dated to the month), so share-count jumps in long EDGAR histories
+  are explained.
 - Yahoo's daily `close` is split-adjusted, not raw; `adj_close` is split- and
   dividend-adjusted.
 

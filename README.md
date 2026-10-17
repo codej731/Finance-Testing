@@ -167,7 +167,7 @@ Each entry records a methodology choice, why it was made, and what it costs. New
 - No backtest exists yet; any claims about performance wait until enough snapshots accumulate.
 
 ## Roadmap
-- [ ] **v1.0** Data layer: canonical schema, validation, snapshot storage, config file *(implemented and unit-tested; pending a first live run)*
+- [ ] **v1.0** Data layer: canonical schema, validation, snapshot storage, config file *(implemented; first live run 2026-10-17 on AAPL, MSFT, RUS.TO, BAM.TO)*
 - [ ] **v1.1** Universe knockouts + factor scoring + composite
 - [ ] **v1.2** Reverse DCF
 - [ ] **v1.3** One-page tear sheet per ticker
@@ -192,7 +192,7 @@ Set `sec.user_agent` in `config.yaml` to `"Your Name your@email.com"` (SEC fair-
 Run the data stage:
 
 ```bash
-python -m data.pipeline AAPL MSFT RUS.TO BAM-A.TO
+python -m data.pipeline AAPL MSFT RUS.TO CCL-B.TO
 python -m data.pipeline --file symbols.txt --notes "weekly refresh"
 ```
 

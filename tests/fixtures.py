@@ -69,12 +69,22 @@ def edgar_companyfacts() -> dict:
                     _fact(1100, "2024-09-30", "2024-11-15", "10-K", k24),
                     _fact(1, "2024-10-15", "2024-11-15", "10-K", k24),  # odd date
                 ),
-                "LongTermDebt": usd(
+                # LongTermDebtNoncurrent + DebtCurrent; the Dec-23 quarter lacks
+                # DebtCurrent, so no complete alternative exists for it.
+                "LongTermDebtNoncurrent": usd(
                     _fact(200, "2024-09-30", "2024-11-15", "10-K", k24),
                     _fact(210, "2023-12-31", "2024-02-01", "10-Q", q1),
                 ),
                 "DebtCurrent": usd(
                     _fact(50, "2024-09-30", "2024-11-15", "10-K", k24),
+                ),
+                # Cash and marketable securities filed as separate tags.
+                "CashAndCashEquivalentsAtCarryingValue": usd(
+                    _fact(100, "2024-09-30", "2024-11-15", "10-K", k24),
+                    _fact(90, "2023-12-31", "2024-02-01", "10-Q", q1),
+                ),
+                "MarketableSecuritiesCurrent": usd(
+                    _fact(40, "2024-09-30", "2024-11-15", "10-K", k24),
                 ),
             },
         },

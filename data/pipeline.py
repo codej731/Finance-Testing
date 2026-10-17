@@ -1,6 +1,6 @@
 """Data-stage run: ingest → normalize → validate → store → snapshot.
 
-    python -m data.pipeline AAPL MSFT RUS.TO BAM-A.TO
+    python -m data.pipeline AAPL MSFT RUS.TO CCL-B.TO
     python -m data.pipeline --file symbols.txt --notes "weekly refresh"
 """
 
@@ -18,6 +18,7 @@ from data.config import Config, load_config
 from data.ingest import (EdgarClient, RawCache, StaticFx, YahooFx, YahooQueryClient,
                          YFinanceClient, normalize_edgar_companyfacts, normalize_yahoo_estimates,
                          normalize_yahoo_history, normalize_yahoo_insiders,
+                         normalize_yahoo_splits,
                          normalize_yahoo_market, normalize_yahoo_security,
                          normalize_yahoo_statements, normalize_yfinance_statements)
 from data.schema import CANADIAN_EXCHANGES, availability_region
@@ -153,15 +154,27 @@ def run_ingest(symbols: list[str], cfg: Config, *, store: Store | None = None,
         long = infer_fiscal_labels(pd.concat(fundamentals, ignore_index=True))
         store.write("fundamentals", long)
 
-    # Prices and splits
+    # Prices and splits. Daily bars give exact split dates; monthly bars over the
+    # full history add older splits (dated to the month) so share-count jumps in
+    # long EDGAR histories can be explained.
+    currencies = dict(zip(securities["yahoo_symbol"], securities["trading_currency"]))
+    prices = None
     try:
-        currencies = dict(zip(securities["yahoo_symbol"], securities["trading_currency"]))
         history = clients.yahoo.history(list(sid_by_symbol), cfg.get("ingest.price_history", "5y"))
         prices, actions = normalize_yahoo_history(history, sid_by_symbol, currencies)
         store.write("prices_daily", prices)
         store.write("corporate_actions", actions)
     except Exception as e:  # noqa: BLE001
         errors.append(f"yahooquery history: {e}")
+    try:
+        monthly = clients.yahoo.history(list(sid_by_symbol), "max", interval="1mo")
+        older = normalize_yahoo_splits(monthly, sid_by_symbol)
+        if prices is not None and not prices.empty:
+            first_daily = older["security_id"].map(prices.groupby("security_id")["date"].min())
+            older = older[first_daily.isna() | (older["date"] < first_daily)]
+        store.write("corporate_actions", older)
+    except Exception as e:  # noqa: BLE001
+        errors.append(f"yahooquery split history: {e}")
 
     # Validate against everything stored for these securities, not just this batch.
     sids = list(securities["security_id"])
@@ -183,7 +196,7 @@ def run_ingest(symbols: list[str], cfg: Config, *, store: Store | None = None,
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("symbols", nargs="*", help="Yahoo symbols (AAPL, RUS.TO, BAM-A.TO)")
+    parser.add_argument("symbols", nargs="*", help="Yahoo symbols (AAPL, RUS.TO, CCL-B.TO)")
     parser.add_argument("--file", type=Path, help="file with one Yahoo symbol per line")
     parser.add_argument("--config", type=Path, default=None)
     parser.add_argument("--notes", default=None)
