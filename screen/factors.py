@@ -260,3 +260,22 @@ def compute_factors(securities: pd.DataFrame, market: pd.DataFrame,
             **insider_factors(ins_g.get(sid, pd.DataFrame()), as_of, window, mcap),
         })
     return pd.DataFrame(rows)
+
+
+def assign_segments(factors: pd.DataFrame, fx, as_of: date, cfg) -> pd.Series:
+    """Peer segment per security (D-018): "royalty" (factors.royalty_companies),
+    "pre_revenue" (base-period revenue below peers.pre_revenue_max, in the
+    universe currency, or no revenue reported) or "producing"."""
+    ref = cfg.get("universe.currency", "USD")
+    limit = cfg.get("peers.pre_revenue_max", 0)
+
+    def segment(r: pd.Series) -> str:
+        if r.get("business_model") == "royalty":
+            return "royalty"
+        rate = fx.rate(r["currency"], ref, as_of) if isinstance(r.get("currency"), str) else None
+        revenue = r.get("revenue", np.nan)
+        if pd.isna(revenue) or (rate is not None and revenue * rate < limit):
+            return "pre_revenue"
+        return "producing"
+
+    return factors.apply(segment, axis=1) if not factors.empty else pd.Series(dtype=object)

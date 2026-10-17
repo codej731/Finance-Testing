@@ -198,6 +198,19 @@ def run_ingest(symbols: list[str], cfg: Config, *, store: Store | None = None,
     return IngestResult(run_id, sids, universe, report, errors, snapshot_path)
 
 
+def freshness_summary(store: Store, run_id: str, cache: RawCache) -> str:
+    """How current this run's inputs are: network vs cache, and quote dates."""
+    lines = ["freshness:"]
+    for source, counts in sorted(cache.stats.items()):
+        lines.append(f"  {source}: {counts['fetched']} fetched, {counts['cached']} from cache "
+                     f"(TTL {cache.ttl_hours.get(source, 24)}h)")
+    q = store.con.execute("SELECT min(as_of), max(as_of) FROM market_snapshot WHERE run_id = ?",
+                          [run_id]).fetchone()
+    if q and q[0] is not None:
+        lines.append(f"  quotes: {q[0]:%Y-%m-%d} to {q[1]:%Y-%m-%d}")
+    return "\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -230,6 +243,7 @@ def main(argv: list[str] | None = None) -> None:
         print(summary.to_string())
     for err in result.errors:
         print(f"error: {err}")
+    print(freshness_summary(store, result.run_id, clients.yahoo.cache))
     print(f"snapshot: {result.snapshot_path}")
     if args.score and result.security_ids:
         from screen.pipeline import print_result, run_screen

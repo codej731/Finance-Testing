@@ -36,6 +36,12 @@ class RawCache:
     def __init__(self, root: str | Path, ttl_hours: dict[str, float]):
         self.root = Path(root)
         self.ttl_hours = ttl_hours
+        # {source: {"cached": n, "fetched": n}} for the run's freshness summary
+        self.stats: dict[str, dict[str, int]] = {}
+
+    def _count(self, source: str, outcome: str) -> None:
+        counts = self.stats.setdefault(source, {"cached": 0, "fetched": 0})
+        counts[outcome] += 1
 
     def _path(self, source: str, key: str, kind: str) -> Path:
         safe = re.sub(r"[^A-Za-z0-9._=-]", "_", key)
@@ -46,8 +52,10 @@ class RawCache:
         path = self._path(source, key, kind)
         ttl = self.ttl_hours.get(source, 24) * 3600
         if path.exists() and time.time() - path.stat().st_mtime < ttl:
+            self._count(source, "cached")
             return pd.read_parquet(path) if kind == "frame" else json.loads(path.read_text())
         data = fetch()
+        self._count(source, "fetched")
         path.parent.mkdir(parents=True, exist_ok=True)
         if kind == "frame":
             data.to_parquet(path, index=False)

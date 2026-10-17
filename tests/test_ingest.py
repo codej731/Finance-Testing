@@ -229,6 +229,7 @@ def test_raw_cache_reuses_fresh_entries(tmp_path):
     assert cache.fetch("yahooquery", "k", fetch) == {"a": 1}
     assert cache.fetch("yahooquery", "k", fetch) == {"a": 1}
     assert len(calls) == 1
+    assert cache.stats["yahooquery"] == {"cached": 1, "fetched": 1}
     frame = cache.fetch("yahooquery", "f", lambda: pd.DataFrame({"x": [1]}), kind="frame")
     assert frame["x"].tolist() == [1]
     assert (tmp_path / "yahooquery" / "f.parquet").exists()

@@ -172,9 +172,13 @@ point-in-time as of the run date.
 
 ### 2.3 Scores (`screen/score.py`)
 
-- Each factor is ranked within the industry when at least
-  `peers.min_peer_count` securities have a value, else the sector, else the
-  universe (D-016). Percentile = (rank − 1)/(n − 1), 1.0 = best, ties
+- **Segments** (D-018): `royalty` (`factors.royalty_companies`), `pre_revenue`
+  (base-period revenue below `peers.pre_revenue_max` in `universe.currency`,
+  or none reported) or `producing`.
+- Each factor is ranked within industry + segment when at least
+  `peers.min_peer_count` securities have a value, else sector + segment,
+  else the whole segment (`peers.min_segment_peers`), else the universe. A
+  security is ranked against every member of its peer set. Percentile = (rank − 1)/(n − 1), 1.0 = best, ties
   averaged; nulls are not ranked and stay null.
 - Category score = mean of its factor percentiles, provided at least
   `scoring.min_factor_share` of the category's factors are present.
@@ -185,6 +189,15 @@ point-in-time as of the run date.
   percentile), every `category:<name>` score and the `composite`, so any
   ranking can be traced to its inputs. The outlier check (schema §6) runs on
   the factor values and logs to `validation_issues`.
+- Composites are relative to the segment: the CLI prints one table per segment.
+
+### 2.4 Freshness (D-019)
+
+Scores compare companies using data stored by the data stage, so freshness
+is checked at each step: raw responses are reused for at most 24 h
+(`cache_ttl_hours`), each run reports fetched vs cached responses and its quote
+dates, the screen refuses runs older than `screen.max_run_age_days` without
+`--allow-stale`, and stale quotes / fiscal years knock companies out.
 
 ## 3. Diagnosis (v1.4)
 

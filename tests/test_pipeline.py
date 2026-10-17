@@ -169,3 +169,16 @@ def test_screen_after_ingest(cfg):
     # Re-scoring the same run replaces, not appends.
     run_screen(store, cfg, fx, ingest.run_id, as_of=AS_OF)
     assert len(store.read("factor_scores", "run_id = ?", [ingest.run_id])) == len(stored)
+
+
+def test_screen_refuses_stale_runs(cfg):
+    from screen.pipeline import StaleRunError, run_screen
+
+    store = Store(cfg.resolve_path("paths.db"), cfg.resolve_path("paths.snapshots"))
+    ingest = _run(cfg, store)
+    store.con.execute("UPDATE run_log SET started_at = started_at - INTERVAL 10 DAY "
+                      "WHERE run_id = ?", [ingest.run_id])
+    fx = StaticFx({"USDCAD": 1.37})
+    with pytest.raises(StaleRunError):
+        run_screen(store, cfg, fx, ingest.run_id)
+    run_screen(store, cfg, fx, ingest.run_id, allow_stale=True)  # explicit override

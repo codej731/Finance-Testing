@@ -10,7 +10,7 @@ paths:
 cache_ttl_hours:
   yahooquery: 24
   yfinance: 24
-  edgar: 168
+  edgar: 24   # a new 10-Q/10-K is picked up within a day
 
 sources:
   # Highest priority first (schema §1).
@@ -100,11 +100,22 @@ universe:
   # D-010: excluded until sector models exist.
   excluded_sectors: [Financial Services, Real Estate]
 
+screen:
+  # Refuse to score a data run older than this (prices and estimates move);
+  # re-run the data stage, or pass --allow-stale to score it anyway.
+  max_run_age_days: 3
+
 peers:
-  # D-002: industry peers from the full universe. With fewer peers the factor
-  # is ranked within the sector, then within the whole universe; the peer
-  # group used is stored with every score.
+  # D-002 / D-018: peers share industry AND segment (producing, pre_revenue,
+  # royalty). A factor is ranked within industry+segment, else sector+segment
+  # (each needs min_peer_count values), else the whole segment across
+  # industries (min_segment_peers), else the universe. The peer group used is
+  # stored with every score.
   min_peer_count: 5
+  min_segment_peers: 3
+  # Below this revenue (universe.currency, base period) a company is
+  # pre-revenue: explorers and developers are ranked against each other.
+  pre_revenue_max: 10_000_000
 
 factors:
   # D-013: a missing debt, minority-interest or cash line is 0 when the balance

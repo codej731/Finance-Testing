@@ -21,7 +21,7 @@ from data.config import Config, load_config
 from data.store import Store
 from data.transform import FxProvider
 from data.validate import check_outliers
-from screen.factors import compute_factors
+from screen.factors import assign_segments, compute_factors
 from screen.score import ranking, score
 from screen.universe import apply_universe
 
@@ -43,14 +43,23 @@ def latest_run_id(store: Store) -> str:
     return row[0]
 
 
+class StaleRunError(RuntimeError):
+    pass
+
+
 def run_screen(store: Store, cfg: Config, fx: FxProvider, run_id: str | None = None,
-               as_of: date | None = None) -> ScreenResult:
+               as_of: date | None = None, allow_stale: bool = False) -> ScreenResult:
     run_id = run_id or latest_run_id(store)
     started = store.con.execute("SELECT started_at FROM run_log WHERE run_id = ?",
                                 [run_id]).fetchone()
     if started is None:
         raise ValueError(f"unknown run {run_id}")
-    as_of = as_of or pd.Timestamp(started[0]).date()
+    run_date = pd.Timestamp(started[0]).date()
+    age = (date.today() - run_date).days
+    if as_of is None and not allow_stale and age > cfg.get("screen.max_run_age_days", 3):
+        raise StaleRunError(f"run {run_id} is {age} days old; re-run the data stage "
+                            f"(or pass --allow-stale)")
+    as_of = as_of or run_date
 
     market = store.read("market_snapshot", "run_id = ?", [run_id])
     sids = list(market["security_id"])
@@ -81,6 +90,8 @@ def run_screen(store: Store, cfg: Config, fx: FxProvider, run_id: str | None = N
         store.read("estimates_snapshot", f"run_id = ? AND {in_run}", [run_id, members]),
         prices, store.read("insider_transactions", in_run, [members]),
         panel("FY"), panel("Q"), panel("TTM"), as_of, cfg)
+    if not factors.empty:
+        factors["segment"] = assign_segments(factors, fx, as_of, cfg)
     scores = score(factors, secs, cfg) if not factors.empty else pd.DataFrame()
 
     # Outputs replace any earlier scoring of this run.
@@ -110,10 +121,12 @@ def print_result(result: ScreenResult, top: int) -> None:
     if not result.ranking.empty:
         cols = [c for c in ("name", "industry", "composite", "quality", "value",
                             "expectations", "price", "risk") if c in result.ranking.columns]
+        # Composites are relative to each segment's own peers: one table each.
         with pd.option_context("display.width", 200, "display.max_colwidth", 30,
                                "display.float_format", "{:.2f}".format):
-            print(f"\ntop {top}:")
-            print(result.ranking[cols].head(top).to_string())
+            for segment, rows in result.ranking.groupby("segment", sort=False):
+                print(f"\n{segment or 'all'} — top {min(top, len(rows))} of {len(rows)}:")
+                print(rows[cols].head(top).to_string())
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -124,10 +137,17 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--run-id", default=None)
     parser.add_argument("--config", type=Path, default=None)
     parser.add_argument("--top", type=int, default=20)
+    parser.add_argument("--allow-stale", action="store_true",
+                        help="score a run older than screen.max_run_age_days")
     args = parser.parse_args(argv)
     cfg = load_config(args.config)
     store = Store(cfg.resolve_path("paths.db"), cfg.resolve_path("paths.snapshots"))
-    print_result(run_screen(store, cfg, build_fx(cfg), args.run_id), args.top)
+    try:
+        result = run_screen(store, cfg, build_fx(cfg), args.run_id,
+                            allow_stale=args.allow_stale)
+    except StaleRunError as e:
+        raise SystemExit(str(e))
+    print_result(result, args.top)
 
 
 if __name__ == "__main__":

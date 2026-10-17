@@ -8,8 +8,8 @@ import pytest
 from data.config import load_config
 from data.ingest import StaticFx
 from data.schema import FIELDS
-from screen.factors import (base_period, compute_factors, estimate_factors, insider_factors,
-                            market_cap, price_factors)
+from screen.factors import (assign_segments, base_period, compute_factors, estimate_factors,
+                            insider_factors, market_cap, price_factors)
 from screen.score import factor_percentiles, ranking, score
 from screen.universe import apply_universe
 
@@ -270,3 +270,42 @@ def test_composite_needs_min_categories():
                       "margin_stability": [1.0, 2, 3, 4, 5]})
     s = score(f, secs, CFG)
     assert s.loc[s["factor"] == "composite", "percentile"].isna().all()
+
+
+# --- segments (D-018) -----------------------------------------------------
+
+def test_assign_segments():
+    f = pd.DataFrame({
+        "security_id": ["P", "E", "N", "R"],
+        "business_model": ["operating", "operating", "operating", "royalty"],
+        "revenue": [5e8, 2e6, np.nan, 1e6], "currency": ["CAD"] * 4})
+    seg = assign_segments(f, StaticFx({"USDCAD": 1.4}), AS_OF, CFG)
+    assert list(seg) == ["producing", "pre_revenue", "pre_revenue", "royalty"]
+
+
+def test_segment_peers_fall_back_to_whole_segment():
+    secs = pd.DataFrame({
+        "security_id": ["G1", "G2", "G3", "G4", "G5", "R1", "R2", "R3"],
+        "industry": ["Gold"] * 5 + ["Gold", "Gold", "Silver"],
+        "sector": ["Basic Materials"] * 8})
+    f = pd.DataFrame({"security_id": secs["security_id"],
+                      "segment": ["producing"] * 5 + ["royalty"] * 3,
+                      "ev_ebitda": [5.0, 6.0, 7.0, 8.0, 9.0, 20.0, 25.0, 30.0]})
+    out = factor_percentiles(f, secs, "ev_ebitda", "low", 5, 3).set_index("security_id")
+    assert out.loc["G1", "peer_group"] == "industry:Gold|producing"
+    assert out.loc["G1", "peer_count"] == 5 and out.loc["G1", "percentile"] == 1.0
+    # Royalty names are not ranked against cheaper miners: 20x is best among royalties.
+    assert out.loc["R1", "peer_group"] == "segment:royalty"
+    assert out.loc["R1", "percentile"] == 1.0 and out.loc["R3", "percentile"] == 0.0
+
+
+def test_ranking_groups_by_segment():
+    secs = _secs(n_gold=5, n_silver=0).assign(segment=["producing"] * 3 + ["pre_revenue"] * 2)
+    f = pd.DataFrame({"security_id": secs["security_id"], "segment": secs["segment"]})
+    for name in CFG.get("scoring.factors"):
+        f[name] = np.arange(5, dtype=float)
+    s = score(f, secs.drop(columns="segment"), CFG)
+    comp = s[s["factor"] == "composite"].set_index("security_id")
+    assert comp.loc["G0", "peer_group"] == "segment:producing" and comp.loc["G0", "peer_count"] == 3
+    r = ranking(s, secs)
+    assert list(r["segment"]) == ["producing"] * 3 + ["pre_revenue"] * 2

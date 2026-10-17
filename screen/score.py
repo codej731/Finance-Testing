@@ -1,9 +1,10 @@
 """Industry-relative percentile ranking and weighted composite (v1.1, D-002, D-006).
 
-Each factor is ranked within the security's industry, drawn from the whole
-investable universe. With fewer than `peers.min_peer_count` non-null values
-in the industry, the sector is used, then the universe; the peer group used is
-stored with every score. Nulls are excluded from a factor's ranking and leave
+Each security belongs to a segment (producing, pre_revenue, royalty; see
+screen.factors.assign_segments). Each factor is ranked within the narrowest
+peer set holding enough non-null values: industry + segment, sector + segment
+(`peers.min_peer_count`), the whole segment (`peers.min_segment_peers`), then
+the universe (D-018). The peer group used is stored with every score. Nulls are excluded from a factor's ranking and leave
 that factor's percentile null (D-006).
 
 Percentile = (rank − 1) / (n − 1), oriented so 1.0 is best; a lone value
@@ -21,32 +22,49 @@ import pandas as pd
 SCORE_COLUMNS = ["security_id", "factor", "raw_value", "peer_group", "peer_count", "percentile"]
 
 
-def _peer_groups(valid: pd.DataFrame, min_peers: int) -> pd.Series:
-    """Peer-group label per security for one factor."""
-    industry_n = valid.groupby("industry")["security_id"].transform("count")
-    sector_n = valid.groupby("sector")["security_id"].transform("count")
-    return pd.Series(np.where(
-        industry_n >= min_peers, "industry:" + valid["industry"].fillna("?"),
-        np.where(sector_n >= min_peers, "sector:" + valid["sector"].fillna("?"), "universe")),
-        index=valid.index)
+def _peer_levels(df: pd.DataFrame) -> list[tuple[str, pd.Series]]:
+    """Peer sets from narrowest to broadest: (label prefix, key per security).
+    With segments: industry+segment, sector+segment, segment, universe."""
+    seg = df["segment"].fillna("")
+    suffix = np.where(seg != "", "|" + seg, "")
+    levels = [("industry", "industry:" + df["industry"].fillna("?") + suffix),
+              ("sector", "sector:" + df["sector"].fillna("?") + suffix)]
+    if (seg != "").any():
+        levels.append(("segment", "segment:" + seg))
+    levels.append(("universe", pd.Series("universe", index=df.index)))
+    return levels
 
 
 def factor_percentiles(factors: pd.DataFrame, securities: pd.DataFrame, factor: str,
-                       direction: str, min_peers: int) -> pd.DataFrame:
-    df = factors[["security_id", factor]].merge(
-        securities[["security_id", "industry", "sector"]], on="security_id", how="left")
+                       direction: str, min_peers: int,
+                       min_segment_peers: int | None = None) -> pd.DataFrame:
+    """Percentiles for one factor. Each security is ranked within the narrowest
+    peer set holding at least `min_peers` non-null values (`min_segment_peers`
+    for a whole segment across industries), against every member of that set."""
+    cols = ["security_id", factor] + (["segment"] if "segment" in factors.columns else [])
+    df = factors[cols].merge(securities[["security_id", "industry", "sector"]],
+                             on="security_id", how="left")
+    if "segment" not in df.columns:
+        df["segment"] = ""
     valid = df[df[factor].notna()].copy()
     out = df[["security_id"]].assign(factor=factor, raw_value=df[factor], peer_group=None,
                                      peer_count=np.nan, percentile=np.nan)
     if valid.empty:
         return out[SCORE_COLUMNS]
-    valid["peer_group"] = _peer_groups(valid, min_peers)
     signed = (valid[factor] if direction == "high" else -valid[factor]).astype(float)
+    levels = _peer_levels(valid)
+    chosen = pd.Series(None, index=valid.index, dtype=object)
+    for name, key in levels:
+        needed = (min_segment_peers or min_peers) if name == "segment" else min_peers
+        counts = key.map(key.value_counts())
+        pick = chosen.isna() & ((counts >= needed) | (name == "universe"))
+        chosen[pick] = key[pick]
+    valid["peer_group"] = chosen
+    keys = {label: key for _, key in levels for label in key.unique()}
     # Rank each security against everyone in its peer set, including peers that
     # are themselves ranked in a narrower group.
     for label, members in valid.groupby("peer_group"):
-        kind, _, key = label.partition(":")
-        peers = signed if kind == "universe" else signed[valid[kind].fillna("?") == key]
+        peers = signed[keys[label] == label]
         ordered = np.sort(peers.to_numpy())
         v = signed[members.index].to_numpy()
         below = np.searchsorted(ordered, v, side="left")
@@ -66,10 +84,12 @@ def score(factors: pd.DataFrame, securities: pd.DataFrame, cfg) -> pd.DataFrame:
     specs = cfg.get("scoring.factors", {})
     weights = cfg.get("scoring.category_weights", {})
     min_peers = cfg.get("peers.min_peer_count", 5)
+    min_segment_peers = cfg.get("peers.min_segment_peers", min_peers)
     min_categories = cfg.get("scoring.min_categories", 1)
     min_share = cfg.get("scoring.min_factor_share", 0.0)
 
-    parts = [factor_percentiles(factors, securities, name, direction, min_peers)
+    parts = [factor_percentiles(factors, securities, name, direction, min_peers,
+                                min_segment_peers)
              for name, (category, direction) in specs.items() if name in factors.columns]
     long = pd.concat(parts, ignore_index=True)
     category_of = {name: category for name, (category, _) in specs.items()}
@@ -89,15 +109,21 @@ def score(factors: pd.DataFrame, securities: pd.DataFrame, cfg) -> pd.DataFrame:
     category_rows = (categories.stack().rename("percentile").reset_index()
                      .assign(factor=lambda d: "category:" + d["category"],
                              peer_group="composite"))
-    composite_rows = composite.rename("percentile").reset_index().assign(
-        factor="composite", peer_group="universe",
-        peer_count=int(composite.notna().sum()))
+    segment = (factors.set_index("security_id")["segment"] if "segment" in factors.columns
+               else pd.Series("", index=factors["security_id"]))
+    composite_rows = composite.rename("percentile").reset_index()
+    composite_rows["peer_group"] = composite_rows["security_id"].map(
+        lambda sid: f"segment:{segment.get(sid)}" if segment.get(sid) else "universe")
+    composite_rows["peer_count"] = composite_rows["peer_group"].map(
+        composite_rows.dropna(subset=["percentile"])["peer_group"].value_counts())
+    composite_rows["factor"] = "composite"
     out = pd.concat([long, category_rows, composite_rows], ignore_index=True)
     return out.reindex(columns=SCORE_COLUMNS)
 
 
 def ranking(scores: pd.DataFrame, securities: pd.DataFrame) -> pd.DataFrame:
-    """Wide view: composite, category scores and identifiers, best first."""
+    """Wide view: segment, composite, category scores and identifiers, best first
+    within each segment."""
     wide = scores[scores["factor"].str.startswith("category:") | (scores["factor"] == "composite")]
     wide = wide.pivot_table(index="security_id", columns="factor", values="percentile",
                             aggfunc="first")
@@ -106,4 +132,10 @@ def ranking(scores: pd.DataFrame, securities: pd.DataFrame) -> pd.DataFrame:
     out = meta.join(wide, how="inner")
     if "composite" not in out.columns:
         out["composite"] = np.nan
-    return out.sort_values("composite", ascending=False, na_position="last")
+    seg = scores[scores["factor"] == "composite"].set_index("security_id")["peer_group"]
+    out.insert(0, "segment", seg.reindex(out.index).str.replace("segment:", "", regex=False)
+               .replace("universe", ""))
+    order = {"producing": 0, "royalty": 1, "pre_revenue": 2}
+    out["_order"] = out["segment"].map(order).fillna(len(order))
+    return (out.sort_values(["_order", "composite"], ascending=[True, False],
+                            na_position="last").drop(columns="_order"))
