@@ -182,3 +182,28 @@ def test_screen_refuses_stale_runs(cfg):
     with pytest.raises(StaleRunError):
         run_screen(store, cfg, fx, ingest.run_id)
     run_screen(store, cfg, fx, ingest.run_id, allow_stale=True)  # explicit override
+
+
+def test_prefilter_limits_full_fetch(cfg):
+    store = Store(cfg.resolve_path("paths.db"), cfg.resolve_path("paths.snapshots"))
+    clients = Clients(yahoo=FakeYahoo(), edgar=FakeEdgar(), fx=StaticFx({"USDCAD": 1.37}))
+    result = run_ingest(["TST", "MINR.TO", "OLD.V"], cfg, store=store, clients=clients,
+                        as_of=AS_OF, prefilter=lambda secs, mkt: {"XNAS:TST"})
+    assert sorted(result.security_ids) == ["XNAS:TST", "XTSE:MINR", "XTSX:OLD"]
+    assert result.fetched == ["XNAS:TST"] and result.universe == ["XNAS:TST"]
+    assert set(store.read("fundamentals")["security_id"]) == {"XNAS:TST"}
+    assert len(store.read("market_snapshot")) == 3          # quotes kept for everyone
+    assert set(store.read("validation_issues")["security_id"]) <= {"XNAS:TST"}
+
+
+def test_store_adds_new_columns_to_old_databases(tmp_path):
+    import duckdb
+    db = tmp_path / "old.duckdb"
+    con = duckdb.connect(str(db))
+    con.execute("CREATE TABLE securities (security_id VARCHAR PRIMARY KEY, ticker VARCHAR)")
+    con.close()
+    store = Store(db, tmp_path / "snap")
+    cols = {r[0] for r in store.con.execute(
+        "SELECT column_name FROM information_schema.columns WHERE table_name='securities'"
+    ).fetchall()}
+    assert {"quote_type", "sector", "industry"} <= cols

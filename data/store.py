@@ -52,6 +52,13 @@ class Store:
         self.con = duckdb.connect(str(db_path))
         for table in TABLES.values():
             self.con.execute(table.ddl())
+            # Databases created by an earlier version get new columns added.
+            existing = {r[0] for r in self.con.execute(
+                "SELECT column_name FROM information_schema.columns WHERE table_name = ?",
+                [table.name]).fetchall()}
+            for name, dtype in table.columns:
+                if name not in existing:
+                    self.con.execute(f'ALTER TABLE {table.name} ADD COLUMN "{name}" {dtype}')
 
     def close(self) -> None:
         self.con.close()

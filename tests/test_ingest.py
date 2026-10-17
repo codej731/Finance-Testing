@@ -233,3 +233,99 @@ def test_raw_cache_reuses_fresh_entries(tmp_path):
     frame = cache.fetch("yahooquery", "f", lambda: pd.DataFrame({"x": [1]}), kind="frame")
     assert frame["x"].tolist() == [1]
     assert (tmp_path / "yahooquery" / "f.parquet").exists()
+
+
+# --- listings and pacing --------------------------------------------------
+
+def test_parse_us_listing():
+    from data.ingest import parse_us_listing
+    text = "\n".join([
+        "Nasdaq Traded|Symbol|Security Name|Listing Exchange|Market Category|ETF|Round Lot Size"
+        "|Test Issue|Financial Status|CQS Symbol|NASDAQ Symbol|NextShares",
+        "Y|AAPL|Apple Inc. - Common Stock|Q|Q|N|100|N|N||AAPL|N",
+        "Y|BRK.B|Berkshire Hathaway Inc. Class B|N| |N|100|N||BRK.B|BRK.B|N",
+        "Y|SPY|SPDR S&P 500 ETF Trust|P| |Y|100|N||SPY|SPY|N",
+        "Y|ABCW|Abc Corp - Warrant|Q|Q|N|100|N|N||ABCW|N",
+        "Y|XYZ$A|Xyz Preferred Series A|N| |N|100|N||XYZ-A|XYZ$A|N",
+        "Y|TSM|Taiwan Semiconductor American Depositary Shares|N| |N|100|N||TSM|TSM|N",
+        "Y|ZZZT|Test Co|Q|Q|N|100|Y|N||ZZZT|N",
+    ])
+    df = parse_us_listing(text)
+    assert list(df["yahoo_symbol"]) == ["AAPL", "BRK-B"]
+    assert list(df["exchange"]) == ["NASDAQ", "NYSE"]
+    assert "TSM" in set(parse_us_listing(text, exclude_adrs=False)["yahoo_symbol"])
+
+
+def test_parse_tmx_listing():
+    from data.ingest import parse_tmx_listing
+    directory = {"results": [
+        {"symbol": "TECK.A", "name": "Teck Resources Limited", "instruments": [
+            {"symbol": "TECK.A", "name": "Teck Res Cl A"},
+            {"symbol": "TECK.B", "name": "Teck Res Cl B"}]},
+        {"symbol": "BCE", "name": "BCE Inc.", "instruments": [
+            {"symbol": "BCE", "name": "BCE Inc."}, {"symbol": "BCE.PR.A", "name": "BCE Pr A"}]},
+        {"symbol": "ZEB", "name": "BMO Equal Weight Banks Index ETF", "instruments": [
+            {"symbol": "ZEB", "name": "BMO EW Banks"}]},
+        {"symbol": "AP.UN", "name": "Allied Properties REIT", "instruments": [
+            {"symbol": "AP.UN", "name": "Allied Prop. REIT Un"},
+            {"symbol": "AP.U", "name": "Allied US"}]},
+        {"symbol": "WAST", "name": "Waste Management CDR (CAD Hedged)", "instruments": [
+            {"symbol": "WAST", "name": "Waste Mgmt CDR"}]},
+        {"symbol": "ABC.P", "name": "Abc Capital Corp.", "instruments": [
+            {"symbol": "ABC.P", "name": "Abc Capital Corp."}]},
+    ]}
+    tsx = parse_tmx_listing(directory, "TSX")
+    assert list(tsx["yahoo_symbol"]) == ["TECK-A.TO", "TECK-B.TO", "BCE.TO", "AP-UN.TO"]
+    assert parse_tmx_listing({"results": directory["results"][:1]}, "TSXV")[
+        "yahoo_symbol"].iat[0] == "TECK-A.V"
+
+
+def test_pacing_spaces_calls_and_retries_with_backoff():
+    from data.ingest import Pacing
+    sleeps = []
+    pacing = Pacing(delay=2.0, max_retries=2, backoff=5.0, sleep=sleeps.append)
+    attempts = []
+
+    def flaky():
+        attempts.append(1)
+        if len(attempts) < 3:
+            raise TimeoutError("read timed out")
+        return "ok"
+
+    assert pacing.call(flaky, "test") == "ok"
+    assert len(attempts) == 3
+    assert [s for s in sleeps if s >= 5] == [5.0, 10.0]          # exponential backoff
+    with pytest.raises(TimeoutError):
+        Pacing(max_retries=1, backoff=0, sleep=lambda s: None).call(
+            lambda: (_ for _ in ()).throw(TimeoutError()), "always fails")
+
+
+def test_transient_errors_are_retried_and_not_cached(tmp_path):
+    from data.ingest import Pacing, RawCache, YahooQueryClient, is_transient_error
+    assert is_transient_error("Invalid Crumb") and not is_transient_error(
+        "Quote not found for symbol: X")
+    calls = []
+
+    class FakeTicker:
+        def __init__(self, symbols, **_):
+            self.symbols = symbols
+
+        def get_modules(self, _):
+            calls.append(list(self.symbols))
+            first = len(calls) == 1
+            return {s: ("Invalid Crumb" if first and s == "B" else {"price": {}})
+                    for s in self.symbols}
+
+    client = YahooQueryClient(RawCache(tmp_path, {}), 10, Pacing(sleep=lambda s: None))
+    client._ticker = FakeTicker
+    out = client.modules(["A", "B"])
+    assert set(out) == {"A", "B"} and calls == [["A", "B"], ["B"]]
+
+
+def test_cache_skips_uncacheable_responses(tmp_path):
+    cache = RawCache(tmp_path, {"yahooquery": 1})
+    n = []
+    fetch = lambda: n.append(1) or {"X": "Invalid Crumb"}  # noqa: E731
+    for _ in range(2):
+        cache.fetch("yahooquery", "k", fetch, cacheable=lambda d: False)
+    assert len(n) == 2

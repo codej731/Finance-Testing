@@ -3,6 +3,7 @@
     python -m data.pipeline AAPL MSFT RUS.TO CCL-B.TO
     python -m data.pipeline --file symbols.txt --notes "weekly refresh"
     python -m data.pipeline --file symbols.txt --score     # then universe + scores
+    python -m data.pipeline --universe us,tsx,tsxv --score # full listings
 """
 
 from __future__ import annotations
@@ -10,13 +11,15 @@ from __future__ import annotations
 import argparse
 import logging
 from dataclasses import dataclass, field
+from typing import Callable
 from datetime import date, datetime, timezone
 from pathlib import Path
 
 import pandas as pd
 
 from data.config import Config, load_config
-from data.ingest import (EdgarClient, RawCache, StaticFx, YahooFx, YahooQueryClient,
+from data.ingest import (EdgarClient, ListingsClient, Pacing, RawCache, StaticFx, YahooFx,
+                         YahooQueryClient,
                          YFinanceClient, normalize_edgar_companyfacts, normalize_yahoo_estimates,
                          normalize_yahoo_history, normalize_yahoo_insiders,
                          normalize_yahoo_splits,
@@ -38,6 +41,7 @@ class IngestResult:
     report: ValidationReport
     errors: list[str] = field(default_factory=list)
     snapshot_path: Path | None = None
+    fetched: list[str] = field(default_factory=list)  # got statements and history
 
 
 @dataclass
@@ -59,22 +63,33 @@ def build_fx(cfg: Config, cache: RawCache | None = None):
 def build_clients(cfg: Config) -> Clients:
     cache = RawCache(cfg.resolve_path("paths.cache"), cfg.get("cache_ttl_hours", {}))
     fx = build_fx(cfg, cache)
+    retries = cfg.get("ingest.max_retries", 3)
+    backoff = cfg.get("ingest.retry_backoff_seconds", 15)
+    timeout = cfg.get("ingest.request_timeout_seconds", 30)
     user_agent = cfg.get("sec.user_agent") or ""
-    edgar = (EdgarClient(cache, user_agent, cfg.get("sec.request_interval", 0.15))
-             if user_agent else None)
+    edgar = (EdgarClient(cache, user_agent, cfg.get("sec.request_interval", 0.15),
+                         retries, backoff, timeout) if user_agent else None)
     if edgar is None:
         log.warning("sec.user_agent is empty: EDGAR ingestion skipped")
-    return Clients(
-        yahoo=YahooQueryClient(cache, cfg.get("ingest.batch_size", 100)),
-        yfinance=YFinanceClient(cache) if cfg.get("ingest.use_yfinance_fallback") else None,
-        edgar=edgar,
-        fx=fx,
-    )
+    yahoo = YahooQueryClient(
+        cache, cfg.get("ingest.batch_size", 50),
+        Pacing(cfg.get("ingest.batch_delay_seconds", 2.0), retries, backoff),
+        {"timeout": timeout, "max_workers": cfg.get("ingest.max_workers", 4)})
+    yf_client = (YFinanceClient(cache, Pacing(cfg.get("ingest.yfinance_delay_seconds", 0.5),
+                                              retries, backoff))
+                 if cfg.get("ingest.use_yfinance_fallback") else None)
+    return Clients(yahoo=yahoo, yfinance=yf_client, edgar=edgar, fx=fx)
+
+
+Prefilter = Callable[[pd.DataFrame, pd.DataFrame], set]
 
 
 def run_ingest(symbols: list[str], cfg: Config, *, store: Store | None = None,
                clients: Clients | None = None, as_of: date | None = None,
-               notes: str | None = None) -> IngestResult:
+               notes: str | None = None, prefilter: Prefilter | None = None) -> IngestResult:
+    """Ingest `symbols`. Quotes are fetched for all of them; with `prefilter`
+    (securities, market snapshot) → security IDs, only those IDs get statements,
+    price history and EDGAR (phase 2). The others keep their quote record."""
     as_of = as_of or date.today()
     store = store or Store(cfg.resolve_path("paths.db"), cfg.resolve_path("paths.snapshots"))
     clients = clients or build_clients(cfg)
@@ -118,9 +133,19 @@ def run_ingest(symbols: list[str], cfg: Config, *, store: Store | None = None,
         market.append(normalize_yahoo_market(sid, m, run_id, as_of))
         estimates.extend(normalize_yahoo_estimates(sid, m, run_id, as_of))
         insiders.extend(normalize_yahoo_insiders(sid, m))
-    store.write("market_snapshot", pd.DataFrame(market))
+    market = pd.DataFrame(market)
+    store.write("market_snapshot", market)
     store.write("estimates_snapshot", pd.DataFrame(estimates))
     store.write("insider_transactions", pd.DataFrame(insiders))
+
+    # Phase 2 only for securities that can pass the market-data knockouts.
+    all_sids = list(securities["security_id"])
+    if prefilter is not None:
+        keep = prefilter(securities, market)
+        log.info("prefilter: %d of %d securities get statements and history",
+                 len(keep), len(all_sids))
+        securities = securities[securities["security_id"].isin(keep)]
+        sid_by_symbol = {sym: sid for sym, sid in sid_by_symbol.items() if sid in keep}
 
     # Fundamentals from every available source; priority is resolved on read.
     fundamentals = []
@@ -183,6 +208,10 @@ def run_ingest(symbols: list[str], cfg: Config, *, store: Store | None = None,
 
     # Validate against everything stored for these securities, not just this batch.
     sids = list(securities["security_id"])
+    if not sids:
+        store.finish_run(run_id, 0, "no securities passed the prefilter")
+        return IngestResult(run_id, all_sids, [], ValidationReport(), errors,
+                            store.snapshot(run_id, all_sids), [])
     report = validate(
         store.read("securities", "list_contains(?, security_id)", [sids]),
         store.fundamentals(sids), as_of, cfg, fx=clients.fx,
@@ -194,8 +223,8 @@ def run_ingest(symbols: list[str], cfg: Config, *, store: Store | None = None,
     universe = [s for s in sids if s not in report.dropped]
     store.finish_run(run_id, len(universe), "; ".join([notes or ""] + errors[:20]).strip("; ")
                      or None)
-    snapshot_path = store.snapshot(run_id, sids)
-    return IngestResult(run_id, sids, universe, report, errors, snapshot_path)
+    snapshot_path = store.snapshot(run_id, all_sids)
+    return IngestResult(run_id, all_sids, universe, report, errors, snapshot_path, sids)
 
 
 def freshness_summary(store: Store, run_id: str, cache: RawCache) -> str:
@@ -216,6 +245,12 @@ def main(argv: list[str] | None = None) -> None:
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("symbols", nargs="*", help="Yahoo symbols (AAPL, RUS.TO, CCL-B.TO)")
     parser.add_argument("--file", type=Path, help="file with one Yahoo symbol per line")
+    parser.add_argument("--universe", default=None,
+                        help="full exchange listings: comma-separated us, tsx, tsxv")
+    parser.add_argument("--limit", type=int, default=None,
+                        help="random sample of this many symbols (trial runs)")
+    parser.add_argument("--no-prefilter", action="store_true",
+                        help="fetch statements and history for every symbol")
     parser.add_argument("--config", type=Path, default=None)
     parser.add_argument("--notes", default=None)
     parser.add_argument("--score", action="store_true",
@@ -224,20 +259,40 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
+    cfg = load_config(args.config)
+    store = Store(cfg.resolve_path("paths.db"), cfg.resolve_path("paths.snapshots"))
+    clients = build_clients(cfg)
+
     symbols = list(args.symbols)
     if args.file:
         symbols += [ln.strip() for ln in args.file.read_text().splitlines()
                     if ln.strip() and not ln.startswith("#")]
+    if args.universe:
+        markets = [m.strip().lower() for m in args.universe.split(",") if m.strip()]
+        listings = ListingsClient(clients.yahoo.cache, clients.yahoo.pacing).listings(
+            markets, cfg.get("listings.exclude_adrs", True))
+        log.info("listings: %s", listings["exchange"].value_counts().to_dict())
+        symbols += list(listings["yahoo_symbol"])
+    symbols = sorted(set(symbols))
+    if args.limit and len(symbols) > args.limit:
+        symbols = sorted(pd.Series(symbols).sample(args.limit, random_state=0))
     if not symbols:
-        parser.error("no symbols given")
+        parser.error("no symbols given (pass symbols, --file or --universe)")
 
-    cfg = load_config(args.config)
-    store = Store(cfg.resolve_path("paths.db"), cfg.resolve_path("paths.snapshots"))
-    clients = build_clients(cfg)
-    result = run_ingest(sorted(set(symbols)), cfg, store=store, clients=clients,
-                        notes=args.notes)
-    print(f"run {result.run_id}: {len(result.security_ids)} securities, "
-          f"{len(result.universe)} passed validation")
+    prefilter = None
+    if args.universe and cfg.get("ingest.prefilter", True) and not args.no_prefilter:
+        from screen.universe import apply_universe
+
+        def prefilter(securities: pd.DataFrame, market: pd.DataFrame) -> set:
+            members = apply_universe(securities, market, pd.DataFrame(
+                columns=["security_id", "check_name", "severity"]), clients.fx,
+                date.today(), cfg)
+            return set(members.loc[members["passed"], "security_id"])
+
+    result = run_ingest(symbols, cfg, store=store, clients=clients, notes=args.notes,
+                        prefilter=prefilter)
+    print(f"run {result.run_id}: {len(result.security_ids)} securities quoted, "
+          f"{len(result.fetched)} fetched in full, {len(result.universe)} passed validation")
     if not result.report.issues.empty:
         summary = result.report.issues.groupby(["check_name", "severity"]).size()
         print(summary.to_string())

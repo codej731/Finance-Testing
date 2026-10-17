@@ -111,9 +111,20 @@ def score(factors: pd.DataFrame, securities: pd.DataFrame, cfg) -> pd.DataFrame:
                              peer_group="composite"))
     segment = (factors.set_index("security_id")["segment"] if "segment" in factors.columns
                else pd.Series("", index=factors["security_id"]))
+    sector = securities.set_index("security_id")["sector"]
+
+    def composite_group(sid: str) -> str:
+        """Producers and pre-revenue companies are listed per sector (D-018);
+        royalty companies form one group."""
+        seg = segment.get(sid)
+        if not seg:
+            return "universe"
+        if seg == "royalty":
+            return "segment:royalty"
+        return f"segment:{seg}|sector:{sector.get(sid) or '?'}"
+
     composite_rows = composite.rename("percentile").reset_index()
-    composite_rows["peer_group"] = composite_rows["security_id"].map(
-        lambda sid: f"segment:{segment.get(sid)}" if segment.get(sid) else "universe")
+    composite_rows["peer_group"] = composite_rows["security_id"].map(composite_group)
     composite_rows["peer_count"] = composite_rows["peer_group"].map(
         composite_rows.dropna(subset=["percentile"])["peer_group"].value_counts())
     composite_rows["factor"] = "composite"
@@ -132,10 +143,12 @@ def ranking(scores: pd.DataFrame, securities: pd.DataFrame) -> pd.DataFrame:
     out = meta.join(wide, how="inner")
     if "composite" not in out.columns:
         out["composite"] = np.nan
-    seg = scores[scores["factor"] == "composite"].set_index("security_id")["peer_group"]
-    out.insert(0, "segment", seg.reindex(out.index).str.replace("segment:", "", regex=False)
-               .replace("universe", ""))
+    group = (scores[scores["factor"] == "composite"].set_index("security_id")["peer_group"]
+             .reindex(out.index).fillna("universe"))
+    out.insert(0, "segment", group.str.extract(r"segment:([^|]+)")[0].fillna(""))
+    out.insert(1, "group", group.str.replace("segment:", "", regex=False)
+               .str.replace("|sector:", " — ", regex=False).replace("universe", "all"))
     order = {"producing": 0, "royalty": 1, "pre_revenue": 2}
     out["_order"] = out["segment"].map(order).fillna(len(order))
-    return (out.sort_values(["_order", "composite"], ascending=[True, False],
+    return (out.sort_values(["_order", "group", "composite"], ascending=[True, True, False],
                             na_position="last").drop(columns="_order"))

@@ -181,15 +181,16 @@ def test_insider_net_buying_officers_only():
 # --- universe -------------------------------------------------------------
 
 def test_universe_knockouts():
-    secs = pd.DataFrame({"security_id": list("ABCDEFG"),
-                         "sector": ["Basic Materials"] * 6 + ["Real Estate"]})
+    secs = pd.DataFrame({"security_id": list("ABCDEFGH"),
+                         "sector": ["Basic Materials"] * 6 + ["Real Estate", "Basic Materials"],
+                         "quote_type": ["EQUITY"] * 7 + ["ETF"]})
     market = pd.DataFrame({
-        "security_id": list("ABCDEFG"), "currency": "CAD",
-        "as_of": [AS_OF] * 5 + [date(2026, 8, 1), AS_OF],
-        "price": [10.0, 0.5, 10.0, 10.0, 10.0, 10.0, 10.0],
-        "market_cap": [5e8, 5e8, 5e7, 5e8, 5e8, 5e8, 5e8],
-        "shares_outstanding": [5e7] * 7,
-        "avg_volume_3m": [1e5, 1e6, 1e5, 1e3, 1e5, 1e5, 1e5]})
+        "security_id": list("ABCDEFGH"), "currency": "CAD",
+        "as_of": [AS_OF] * 5 + [date(2026, 8, 1), AS_OF, AS_OF],
+        "price": [10.0, 0.5, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0],
+        "market_cap": [5e8, 5e8, 5e7, 5e8, 5e8, 5e8, 5e8, 5e8],
+        "shares_outstanding": [5e7] * 8,
+        "avg_volume_3m": [1e5, 1e6, 1e5, 1e3, 1e5, 1e5, 1e5, 1e5]})
     issues = pd.DataFrame({"security_id": ["E"], "check_name": ["staleness"],
                            "severity": ["drop"]})
     out = apply_universe(secs, market, issues, StaticFx({"USDCAD": 1.4}), AS_OF,
@@ -202,6 +203,7 @@ def test_universe_knockouts():
     assert out.loc["E", "reason"] == "validation: staleness"
     assert out.loc["F", "reason"].startswith("stale quote")
     assert out.loc["G", "reason"].startswith("excluded sector")
+    assert out.loc["H", "reason"] == "not common equity: ETF"
 
 
 # --- scoring --------------------------------------------------------------
@@ -306,6 +308,8 @@ def test_ranking_groups_by_segment():
         f[name] = np.arange(5, dtype=float)
     s = score(f, secs.drop(columns="segment"), CFG)
     comp = s[s["factor"] == "composite"].set_index("security_id")
-    assert comp.loc["G0", "peer_group"] == "segment:producing" and comp.loc["G0", "peer_count"] == 3
+    assert comp.loc["G0", "peer_group"] == "segment:producing|sector:Basic Materials"
+    assert comp.loc["G0", "peer_count"] == 3
     r = ranking(s, secs)
     assert list(r["segment"]) == ["producing"] * 3 + ["pre_revenue"] * 2
+    assert r["group"].iloc[0] == "producing — Basic Materials"

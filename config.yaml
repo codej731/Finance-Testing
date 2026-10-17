@@ -26,9 +26,22 @@ sec:
   request_interval: 0.15
 
 ingest:
-  batch_size: 100          # symbols per yahooquery request
-  price_history: 5y        # yahooquery history period
+  batch_size: 50                 # symbols per yahooquery request
+  # Pacing, so thousands of symbols don't trip Yahoo's rate limits or time out.
+  batch_delay_seconds: 2.0       # pause between yahooquery batches
+  request_timeout_seconds: 30    # per HTTP request (yahooquery default is 5)
+  max_workers: 4                 # concurrent requests within a batch
+  max_retries: 3                 # per batch / request, after the first try
+  retry_backoff_seconds: 15      # doubles on each retry: 15, 30, 60
+  yfinance_delay_seconds: 0.5    # between yfinance calls (fallback only)
+  price_history: 5y              # yahooquery history period
   use_yfinance_fallback: true
+  # With --universe, only securities passing the market-data knockouts (price,
+  # size, liquidity, sector, equity type) get statements, history and EDGAR.
+  prefilter: true
+
+listings:
+  exclude_adrs: true             # thesis is North American companies
 
 # Days after period_end before a Yahoo-sourced figure is treated as known
 # (schema §5). EDGAR rows use the actual filing date instead.

@@ -274,6 +274,7 @@ TABLES: dict[str, Table] = {t.name: t for t in [
         ("country", "VARCHAR"), ("trading_currency", "VARCHAR"),
         ("reporting_currency", "VARCHAR"), ("sector", "VARCHAR"), ("industry", "VARCHAR"),
         ("is_active", "BOOLEAN"), ("first_seen", "DATE"), ("last_seen", "DATE"),
+        ("quote_type", "VARCHAR"),  # Yahoo quoteType: EQUITY, ETF, MUTUALFUND…
     ), ("security_id",)),
     Table("prices_daily", (
         ("security_id", "VARCHAR"), ("date", "DATE"), ("open", "DOUBLE"), ("high", "DOUBLE"),

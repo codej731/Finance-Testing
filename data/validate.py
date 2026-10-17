@@ -113,17 +113,21 @@ SIGN_RULES = (
 
 def check_sign_sanity(panel: pd.DataFrame) -> pd.DataFrame:
     """Drop if the latest period of a type fails; warn for older periods."""
-    issues = []
-    for (sid, ptype), grp in panel.groupby(["security_id", "period_type"]):
-        latest_end = grp["period_end"].max()
-        for _, r in grp.iterrows():
-            for fname, bad, label in SIGN_RULES:
-                v = r[fname]
-                if pd.notna(v) and bad(v):
-                    severity = DROP if r["period_end"] == latest_end else WARN
-                    issues.append(_issue(sid, "sign_sanity", severity, label, field=fname,
-                                         period_type=ptype, period_end=r["period_end"]))
-    return _frame(issues)
+    if panel.empty:
+        return _frame([])
+    latest = panel.groupby(["security_id", "period_type"])["period_end"].transform("max")
+    parts = []
+    for fname, bad, label in SIGN_RULES:
+        v = panel[fname]
+        hit = panel[v.notna() & bad(v.fillna(0))]
+        if hit.empty:
+            continue
+        parts.append(pd.DataFrame({
+            "security_id": hit["security_id"], "check_name": "sign_sanity",
+            "severity": (hit["period_end"] == latest[hit.index]).map({True: DROP, False: WARN}),
+            "field": fname, "period_type": hit["period_type"], "period_end": hit["period_end"],
+            "detail": label}))
+    return pd.concat(parts, ignore_index=True)[ISSUE_COLUMNS] if parts else _frame([])
 
 
 def check_share_jumps(panel: pd.DataFrame, threshold: float,
@@ -162,26 +166,28 @@ def check_source_conflicts(long: pd.DataFrame, tolerance: float,
                            priority: tuple[str, ...] = SOURCES) -> pd.DataFrame:
     """Same field/period differing by more than `tolerance` across sources.
     The higher-priority source is kept by transform.resolve_sources."""
-    issues = []
     work = align_period_ends(long.dropna(subset=["value"]), priority)
-    rank = {s: i for i, s in enumerate(priority)}
+    if work.empty:
+        return _frame([])
     key = ["security_id", "field", "period_type", "period_end"]
-    multi = work[work.duplicated(key, keep=False)]
-    for (sid, fname, ptype, pend), grp in multi.groupby(key):
-        grp = grp.assign(_rank=grp["source"].map(rank)).sort_values("_rank")
-        kept = grp.iloc[0]
-        for _, other in grp.iloc[1:].iterrows():
-            scale = max(abs(kept["value"]), abs(other["value"]))
-            if scale == 0:
-                continue
-            diff = abs(kept["value"] - other["value"]) / scale
-            if diff > tolerance:
-                issues.append(_issue(
-                    sid, "source_conflict", WARN,
-                    f"{kept['source']}={kept['value']:.6g} vs {other['source']}="
-                    f"{other['value']:.6g} ({diff:.1%}); kept {kept['source']}",
-                    field=fname, period_type=ptype, period_end=pend))
-    return _frame(issues)
+    rank = {s: i for i, s in enumerate(priority)}
+    work = (work.assign(_rank=work["source"].map(rank).fillna(len(priority)))
+            .sort_values(key + ["_rank"]))
+    work = work[work.duplicated(key, keep=False)]
+    if work.empty:
+        return _frame([])
+    kept = work.drop_duplicates(key, keep="first")[key + ["source", "value"]]
+    others = work[work.duplicated(key, keep="first")][key + ["source", "value"]]
+    pairs = others.merge(kept, on=key, suffixes=("", "_kept"))
+    scale = pd.concat([pairs["value"].abs(), pairs["value_kept"].abs()], axis=1).max(axis=1)
+    diff = (pairs["value"] - pairs["value_kept"]).abs() / scale.where(scale > 0)
+    bad = pairs[diff > tolerance].assign(diff=diff[diff > tolerance])
+    detail = [f"{r.source_kept}={r.value_kept:.6g} vs {r.source}={r.value:.6g} "
+              f"({r.diff:.1%}); kept {r.source_kept}" for r in bad.itertuples()]
+    return pd.DataFrame({"security_id": bad["security_id"], "check_name": "source_conflict",
+                         "severity": WARN, "field": bad["field"],
+                         "period_type": bad["period_type"], "period_end": bad["period_end"],
+                         "detail": detail}, columns=ISSUE_COLUMNS).reset_index(drop=True)
 
 
 def check_completeness(fy: pd.DataFrame, security_ids: list[str], required: list[str],

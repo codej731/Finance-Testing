@@ -36,8 +36,11 @@ def apply_universe(securities: pd.DataFrame, market: pd.DataFrame,
         mcap = market_cap(m) * rate if m is not None and rate else float("nan")
         dollar_vol = (m["avg_volume_3m"] * m["price"] * rate
                       if m is not None and rate else float("nan"))
+        quote_type = sec.get("quote_type")
         if sid in dropped.index:
             reason = f"validation: {dropped[sid]}"
+        elif isinstance(quote_type, str) and quote_type != "EQUITY":
+            reason = f"not common equity: {quote_type}"
         elif sec["sector"] in excluded:
             reason = f"excluded sector: {sec['sector']}"
         elif m is None or pd.isna(m["price"]):

@@ -7,9 +7,11 @@ every vendor field name is resolved, via data.schema.
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import io
 import json
+import logging
 import re
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -22,6 +24,8 @@ import pandas as pd
 from data.schema import (FIELDS, TABLES, apply_sign, exchange_for, native_ticker,
                          parse_component, resolve_alternatives, yfinance_name)
 from data.transform import estimated_available_date
+
+log = logging.getLogger(__name__)
 
 FUNDAMENTAL_COLUMNS = TABLES["fundamentals"].column_names
 YAHOO_MODULES = ("summaryProfile", "price", "summaryDetail", "defaultKeyStatistics",
@@ -45,23 +49,68 @@ class RawCache:
 
     def _path(self, source: str, key: str, kind: str) -> Path:
         safe = re.sub(r"[^A-Za-z0-9._=-]", "_", key)
-        return self.root / source / f"{safe}.{'parquet' if kind == 'frame' else 'json'}"
+        return self.root / source / f"{safe}.{'parquet' if kind == 'frame' else 'json.gz'}"
 
-    def fetch(self, source: str, key: str, fetch: Callable[[], Any], kind: str = "json") -> Any:
-        """Return the cached response if fresh, else call `fetch` and cache it."""
+    def fetch(self, source: str, key: str, fetch: Callable[[], Any], kind: str = "json",
+              cacheable: Callable[[Any], bool] | None = None) -> Any:
+        """Return the cached response if fresh, else call `fetch` and cache it.
+        JSON is gzip-compressed (SEC companyfacts are several MB each). A response
+        failing `cacheable` (e.g. still holding transient errors) is not stored."""
         path = self._path(source, key, kind)
         ttl = self.ttl_hours.get(source, 24) * 3600
         if path.exists() and time.time() - path.stat().st_mtime < ttl:
             self._count(source, "cached")
-            return pd.read_parquet(path) if kind == "frame" else json.loads(path.read_text())
+            if kind == "frame":
+                return pd.read_parquet(path)
+            with gzip.open(path, "rt") as f:
+                return json.load(f)
         data = fetch()
         self._count(source, "fetched")
+        if cacheable is not None and not cacheable(data):
+            return data
         path.parent.mkdir(parents=True, exist_ok=True)
         if kind == "frame":
             data.to_parquet(path, index=False)
         else:
-            path.write_text(json.dumps(data, default=str))
+            with gzip.open(path, "wt") as f:
+                json.dump(data, f, default=str)
         return data
+
+
+class Pacing:
+    """Spacing and retries for remote calls: at least `delay` seconds between
+    calls, and up to `max_retries` retries with exponential backoff."""
+
+    def __init__(self, delay: float = 0.0, max_retries: int = 3, backoff: float = 10.0,
+                 sleep: Callable[[float], None] = time.sleep):
+        self.delay, self.max_retries, self.backoff, self.sleep = delay, max_retries, backoff, sleep
+        self._last = 0.0
+
+    def wait(self) -> None:
+        remaining = self.delay - (time.monotonic() - self._last)
+        if self._last and remaining > 0:
+            self.sleep(remaining)
+        self._last = time.monotonic()
+
+    def call(self, fn: Callable[[], Any], what: str) -> Any:
+        for attempt in range(self.max_retries + 1):
+            self.wait()
+            try:
+                return fn()
+            except Exception as e:  # noqa: BLE001 - network errors come in many types
+                if attempt == self.max_retries:
+                    raise
+                pause = self.backoff * 2 ** attempt
+                log.warning("%s failed (%s); retry %d/%d in %.0fs", what, e, attempt + 1,
+                            self.max_retries, pause)
+                self.sleep(pause)
+        raise AssertionError("unreachable")
+
+
+def is_transient_error(message: Any) -> bool:
+    """yahooquery reports per-symbol failures as strings; "not found" is permanent,
+    anything else (crumb, rate limit, timeout) is worth retrying."""
+    return isinstance(message, str) and "not found" not in message.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +183,7 @@ def normalize_yahoo_security(symbol: str, modules: dict, as_of: date) -> dict:
         "is_active": True,
         "first_seen": as_of,
         "last_seen": as_of,
+        "quote_type": price.get("quoteType"),
     }
 
 
@@ -559,53 +609,82 @@ def _chunks(items: list, size: int) -> Iterable[list]:
 
 
 class YahooQueryClient:
-    def __init__(self, cache: RawCache, batch_size: int = 100):
+    def __init__(self, cache: RawCache, batch_size: int = 50, pacing: Pacing | None = None,
+                 ticker_options: dict | None = None):
         self.cache = cache
         self.batch_size = batch_size
+        self.pacing = pacing or Pacing()
+        # Passed to yahooquery.Ticker: timeout, max_workers, retry, backoff_factor…
+        self.ticker_options = {"asynchronous": True, **(ticker_options or {})}
+
+    def _ticker(self, symbols: list[str]):
+        from yahooquery import Ticker
+        return Ticker(symbols, **self.ticker_options)
+
+    def _modules_batch(self, batch: list[str]) -> dict:
+        data = self.pacing.call(lambda: self._ticker(batch).get_modules(list(YAHOO_MODULES)),
+                                f"quotes for {len(batch)} symbols")
+        data = data if isinstance(data, dict) else {}
+        for attempt in range(self.pacing.max_retries):
+            retry = [s for s in batch if s not in data or is_transient_error(data[s])]
+            if not retry:
+                break
+            self.pacing.sleep(self.pacing.backoff * 2 ** attempt)
+            again = self.pacing.call(
+                lambda r=retry: self._ticker(r).get_modules(list(YAHOO_MODULES)),
+                f"quote retry for {len(retry)} symbols")
+            if isinstance(again, dict):
+                data.update({k: v for k, v in again.items() if isinstance(v, dict)
+                             or k not in data})
+        return data
 
     def modules(self, symbols: list[str]) -> dict[str, dict]:
-        from yahooquery import Ticker
         out: dict[str, dict] = {}
-        for batch in _chunks(symbols, self.batch_size):
-            data = self.cache.fetch("yahooquery", f"modules_{_digest(batch)}", lambda b=batch: Ticker(
-                b, asynchronous=True).get_modules(list(YAHOO_MODULES)))
+        batches = list(_chunks(symbols, self.batch_size))
+        for i, batch in enumerate(batches):
+            if i % 20 == 0:
+                log.info("quotes: batch %d/%d", i + 1, len(batches))
+            data = self.cache.fetch(
+                "yahooquery", f"modules_{_digest(batch)}", lambda b=batch: self._modules_batch(b),
+                cacheable=lambda d: not any(is_transient_error(v) for v in d.values()))
             out.update({s: d for s, d in data.items() if isinstance(d, dict)})
         return out
 
-    def financials(self, symbols: list[str], frequency: str) -> pd.DataFrame:
-        from yahooquery import Ticker
-
-        def fetch(batch: list[str]) -> pd.DataFrame:
-            df = Ticker(batch, asynchronous=True).all_financial_data(frequency=frequency)
-            return df.reset_index() if isinstance(df, pd.DataFrame) else pd.DataFrame()
-
-        frames = [self.cache.fetch("yahooquery", f"financials_{frequency}_{_digest(b)}",
-                                   lambda b=b: fetch(b), kind="frame")
-                  for b in _chunks(symbols, self.batch_size)]
+    def _frames(self, symbols: list[str], key: str, call: Callable, what: str) -> pd.DataFrame:
+        frames = []
+        batches = list(_chunks(symbols, self.batch_size))
+        for i, batch in enumerate(batches):
+            if i % 20 == 0:
+                log.info("%s: batch %d/%d", what, i + 1, len(batches))
+            frames.append(self.cache.fetch(
+                "yahooquery", f"{key}_{_digest(batch)}",
+                lambda b=batch: self.pacing.call(lambda: call(b), f"{what} for {len(b)} symbols"),
+                kind="frame"))
         frames = [f for f in frames if not f.empty]
         return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
-    def history(self, symbols: list[str], period: str, interval: str = "1d") -> pd.DataFrame:
-        from yahooquery import Ticker
+    def financials(self, symbols: list[str], frequency: str) -> pd.DataFrame:
+        def call(batch: list[str]) -> pd.DataFrame:
+            df = self._ticker(batch).all_financial_data(frequency=frequency)
+            return df.reset_index() if isinstance(df, pd.DataFrame) else pd.DataFrame()
+        return self._frames(symbols, f"financials_{frequency}", call, f"financials ({frequency})")
 
-        def fetch(batch: list[str]) -> pd.DataFrame:
-            df = Ticker(batch, asynchronous=True).history(period=period, interval=interval)
+    def history(self, symbols: list[str], period: str, interval: str = "1d") -> pd.DataFrame:
+        def call(batch: list[str]) -> pd.DataFrame:
+            df = self._ticker(batch).history(period=period, interval=interval)
             if not isinstance(df, pd.DataFrame) or df.empty:
                 return pd.DataFrame()
             df = df.reset_index()
             df["date"] = pd.to_datetime(df["date"].astype(str).str[:10])
             return df
-
-        frames = [self.cache.fetch("yahooquery", f"history_{period}_{interval}_{_digest(b)}",
-                                   lambda b=b: fetch(b), kind="frame")
-                  for b in _chunks(symbols, self.batch_size)]
-        frames = [f for f in frames if not f.empty]
-        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        return self._frames(symbols, f"history_{period}_{interval}", call,
+                            f"history ({period}, {interval})")
 
 
 class YFinanceClient:
-    def __init__(self, cache: RawCache):
+    def __init__(self, cache: RawCache, pacing: Pacing | None = None):
         self.cache = cache
+        self.pacing = pacing or Pacing()
 
     def statements(self, symbol: str) -> tuple[dict[str, list[pd.DataFrame]], str | None]:
         import yfinance as yf
@@ -617,7 +696,7 @@ class YFinanceClient:
             frames = []
             for name in names:
                 def fetch(name=name) -> pd.DataFrame:
-                    df = getattr(t, name)
+                    df = self.pacing.call(lambda: getattr(t, name), f"yfinance {symbol} {name}")
                     df = df.copy()
                     df.columns = [str(pd.Timestamp(c).date()) for c in df.columns]
                     return df.reset_index(names="label")
@@ -633,23 +712,25 @@ class EdgarClient:
     TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
     FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
 
-    def __init__(self, cache: RawCache, user_agent: str, request_interval: float = 0.15):
+    def __init__(self, cache: RawCache, user_agent: str, request_interval: float = 0.15,
+                 max_retries: int = 3, backoff: float = 10.0, timeout: float = 30.0):
         if not user_agent:
             raise ValueError("SEC requires a User-Agent ('Name email'); set sec.user_agent")
         self.cache = cache
         self.headers = {"User-Agent": user_agent, "Accept-Encoding": "gzip, deflate"}
-        self.request_interval = request_interval
-        self._last_request = 0.0
+        self.pacing = Pacing(request_interval, max_retries, backoff)
+        self.timeout = timeout
 
     def _get_json(self, url: str) -> dict:
         import requests
-        wait = self.request_interval - (time.monotonic() - self._last_request)
-        if wait > 0:
-            time.sleep(wait)
-        self._last_request = time.monotonic()
-        resp = requests.get(url, headers=self.headers, timeout=30)
-        resp.raise_for_status()
-        return resp.json()
+
+        def get() -> dict:
+            resp = requests.get(url, headers=self.headers, timeout=self.timeout)
+            if resp.status_code == 404:
+                return {}  # no XBRL facts for this filer: permanent, not retried
+            resp.raise_for_status()
+            return resp.json()
+        return self.pacing.call(get, f"SEC {url.rsplit('/', 1)[-1]}")
 
     def cik_map(self) -> dict[str, str]:
         """Exchange-native ticker (BRK.B) → zero-padded CIK."""
@@ -737,35 +818,89 @@ class YahooFx:
 # Listings (input to the universe stage)
 # ---------------------------------------------------------------------------
 
-def list_us_symbols() -> list[str]:
-    """Common stocks from NASDAQ Trader's nasdaqtraded.txt, as Yahoo symbols."""
-    import requests
-    resp = requests.get("https://www.nasdaqtrader.com/dynamic/symdir/nasdaqtraded.txt",
-                        timeout=30)
-    resp.raise_for_status()
-    df = pd.read_csv(io.StringIO(resp.text), sep="|")
-    df = df[(df["Test Issue"] == "N") & (df["ETF"] == "N")].dropna(subset=["Symbol"])
-    symbols = df["Symbol"].astype(str)
-    return sorted(s.replace(".", "-") for s in symbols if "$" not in s)  # $ = preferreds
+LISTING_COLUMNS = ["yahoo_symbol", "exchange", "name"]
+NASDAQ_EXCHANGES = {"Q": "NASDAQ", "N": "NYSE", "A": "NYSEAMERICAN", "P": "NYSEARCA",
+                    "Z": "CBOE", "V": "IEX"}
+# Not common equity. Yahoo's quoteType (must be EQUITY) is the final check;
+# these name patterns only avoid fetching obvious non-equities.
+US_EXCLUDE = re.compile(r"warrant|\bunits?\b|\brights?\b|preferred|\bnotes?\b|debenture"
+                        r"|\bfund\b|\bETN\b|beneficial (?:interest|ownership)", re.I)
+ADR_PATTERN = re.compile(r"depositary|\bADR\b|\bADS\b", re.I)
+TMX_EXCLUDE = re.compile(r"\bETFs?\b|\bfunds?\b|\bfd\b|index|portfolio|\bbonds?\b|\bbnd\b"
+                         r"|covered call|\bcov\b|split corp|bitcoin|ether|\bpr\b|pref|\bCDR\b"
+                         r"|depositary receipt|\bETP\b", re.I)
+# TMX suffixes kept: share classes and trust units. Dropped: .U (USD-quoted
+# duplicate line), .PR.* preferreds, .DB debentures, .WT warrants, .P capital
+# pool shells (TSX-V), and the letter series used by ETFs (.F, .T, …).
+TMX_KEEP_SUFFIXES = {"", "A", "B", "C", "D", "E", "UN"}
 
 
-def list_tsx_symbols() -> list[str]:
-    """TSX / TSX-V symbols from the TMX MOC-eligible list, as Yahoo symbols."""
-    import requests
-    resp = requests.get("https://www.tsx.com/files/trading/moc-eligible-stocks.txt",
-                        headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
-    resp.raise_for_status()
-    out = []
-    for line in resp.text.splitlines():
-        parts = line.split()
-        if len(parts) < 3:
-            continue
-        if parts[0] in ("TSX", "TSXV"):
-            exchange, symbol = parts[0], parts[1]
-        elif parts[-1] in ("TSX", "TSXV"):
-            exchange, symbol = parts[-1], parts[0]
-        else:
-            continue
-        out.append(f"{symbol.replace('.', '-')}{'.TO' if exchange == 'TSX' else '.V'}")
-    return sorted(set(out))
+def parse_us_listing(text: str, exclude_adrs: bool = True) -> pd.DataFrame:
+    """NASDAQ Trader nasdaqtraded.txt → common stocks as Yahoo symbols."""
+    df = pd.read_csv(io.StringIO(text), sep="|", dtype=str).dropna(subset=["Symbol"])
+    df = df[(df["Test Issue"] == "N") & (df["ETF"] == "N")
+            & (df.get("NextShares", "N").fillna("N") == "N")]
+    df = df[~df["Symbol"].str.contains(r"\$", regex=True)]          # $ = preferred series
+    names = df["Security Name"].fillna("")
+    keep = ~names.str.contains(US_EXCLUDE)
+    if exclude_adrs:
+        keep &= ~names.str.contains(ADR_PATTERN)
+    df = df[keep]
+    return pd.DataFrame({
+        "yahoo_symbol": df["Symbol"].str.replace(".", "-", regex=False),
+        "exchange": df["Listing Exchange"].map(NASDAQ_EXCHANGES).fillna("US"),
+        "name": names[keep].str.strip(),
+    }, columns=LISTING_COLUMNS).drop_duplicates("yahoo_symbol").reset_index(drop=True)
 
+
+def parse_tmx_listing(directory: dict, exchange: str) -> pd.DataFrame:
+    """TMX company directory JSON → equities as Yahoo symbols (.TO / .V)."""
+    yahoo_suffix = {"TSX": ".TO", "TSXV": ".V"}[exchange]
+    rows = []
+    for company in directory.get("results", []):
+        for inst in company.get("instruments", []):
+            symbol, name = inst.get("symbol", ""), inst.get("name") or company.get("name", "")
+            base, _, suffix = symbol.partition(".")
+            company_name = company.get("name", "")
+            if (suffix not in TMX_KEEP_SUFFIXES or TMX_EXCLUDE.search(name)
+                    or TMX_EXCLUDE.search(company_name)):
+                continue
+            yahoo = base + (f"-{suffix}" if suffix else "") + yahoo_suffix
+            rows.append((yahoo, exchange, company.get("name") or name))
+    return (pd.DataFrame(rows, columns=LISTING_COLUMNS).drop_duplicates("yahoo_symbol")
+            .reset_index(drop=True))
+
+
+class ListingsClient:
+    US_URL = "https://www.nasdaqtrader.com/dynamic/symdir/nasdaqtraded.txt"
+    TMX_URL = "https://www.tsx.com/json/company-directory/search/{market}/%5E*"
+
+    def __init__(self, cache: RawCache, pacing: Pacing | None = None):
+        self.cache = cache
+        self.pacing = pacing or Pacing()
+
+    def _get(self, url: str, as_json: bool) -> Any:
+        import requests
+
+        def get():
+            resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=60)
+            resp.raise_for_status()
+            return resp.json() if as_json else resp.text
+        return self.pacing.call(get, f"listing {url}")
+
+    def listings(self, markets: list[str], exclude_adrs: bool = True) -> pd.DataFrame:
+        """markets: any of "us", "tsx", "tsxv"."""
+        frames = []
+        for market in markets:
+            if market == "us":
+                text = self.cache.fetch("listings", "us",
+                                        lambda: {"text": self._get(self.US_URL, False)})["text"]
+                frames.append(parse_us_listing(text, exclude_adrs))
+            elif market in ("tsx", "tsxv"):
+                data = self.cache.fetch("listings", market, lambda m=market: self._get(
+                    self.TMX_URL.format(market=m), True))
+                frames.append(parse_tmx_listing(data, market.upper()))
+            else:
+                raise ValueError(f"unknown market {market!r} (use us, tsx, tsxv)")
+        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(
+            columns=LISTING_COLUMNS)
