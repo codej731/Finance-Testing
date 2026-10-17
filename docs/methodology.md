@@ -24,6 +24,18 @@ All sources are stored side by side in `fundamentals` (the `source` column is
 part of the key). Priority is applied when reading, not when writing, so a
 lower-priority value is never lost and conflicts stay auditable.
 
+### 1.1a Full listings and pacing (D-020)
+
+`--universe us,tsx,tsxv` builds the symbol list from NASDAQ Trader
+(`nasdaqtraded.txt`) and the TMX company directory, keeping common equity
+only (see `data/ingest.py` for the name and suffix rules; Yahoo `quoteType`
+must be `EQUITY`). Phase 1 fetches quotes for every symbol; phase 2
+(statements, price history, EDGAR) runs only for securities passing the
+universe's market-data knockouts. Requests are paced by `ingest.*`:
+batch size, delay between batches, timeout, retries with exponential backoff.
+Per-symbol transient errors (expired crumb, rate limit) are retried and never
+cached; "not found" is permanent.
+
 ### 1.2 EDGAR normalization
 
 The XBRL `companyfacts` feed needs several corrections before it matches the
@@ -189,7 +201,9 @@ point-in-time as of the run date.
   percentile), every `category:<name>` score and the `composite`, so any
   ranking can be traced to its inputs. The outlier check (schema §6) runs on
   the factor values and logs to `validation_issues`.
-- Composites are relative to the segment: the CLI prints one table per segment.
+- Composites are relative to the segment: the CLI prints one table per
+  sector for producers and pre-revenue companies, and one for royalty
+  companies.
 
 ### 2.4 Freshness (D-019)
 

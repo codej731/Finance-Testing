@@ -185,13 +185,18 @@ Each entry records a methodology choice, why it was made, and what it costs. New
 
 ### D-018 · Peers share industry and segment — 2026-10-17
 **Context:** Royalty companies (~22–24× EBITDA) were ranked against gold miners (5–9×) in the same "Gold" industry, and pre-revenue explorers against producers, so the ranking mostly reflected business model rather than cheapness.
-**Decision:** Each company gets a segment: `royalty` (config list), `pre_revenue` (revenue below `peers.pre_revenue_max` in USD) or `producing`. A factor is ranked within industry + segment, else sector + segment, else the whole segment across industries (`peers.min_segment_peers`), else the universe. Composites are compared only within a segment, and output is one table per segment. This extends D-002/D-016.
+**Decision:** Each company gets a segment: `royalty` (config list), `pre_revenue` (revenue below `peers.pre_revenue_max` in USD) or `producing`. A factor is ranked within industry + segment, else sector + segment, else the whole segment across industries (`peers.min_segment_peers`), else the universe. Producers and pre-revenue companies are listed per sector (Technology, Consumer Defensive, Industrials, …), royalty companies as one group. This extends D-002/D-016.
 **Consequences:** Fairer comparisons; small segments have coarse percentiles until the universe is the full listing.
 
 ### D-019 · Freshness is enforced, not assumed — 2026-10-17
 **Context:** Peers are compared from data stored in the database, so scores are only as current as the last data run.
 **Decision:** Raw API responses (including EDGAR) are reused for at most 24 hours. Each run prints how many responses were fetched versus taken from the cache, and its quote dates. The screen refuses to score a run older than `screen.max_run_age_days` (3) unless `--allow-stale` is passed. Quotes older than 7 days, and fiscal years older than 15/16 months, already knock a company out.
 **Consequences:** Scores cannot silently rest on old prices; scoring old runs on purpose (e.g. for backtests) needs the explicit flag.
+
+### D-020 · Universe from full exchange listings, fetched in two phases — 2026-10-17
+**Context:** Peer groups are drawn only from the symbols ingested; a hand-picked list gave groups of 3–5 and coarse percentiles.
+**Decision:** `--universe us,tsx,tsxv` takes every listed common stock (NASDAQ Trader for NYSE/NASDAQ/NYSE American; the TMX company directory for TSX and TSX-V), dropping ETFs, preferreds, debentures, warrants, USD duplicate lines, capital pool shells, CDRs and ADRs; Yahoo's `quoteType` must be `EQUITY`. Quotes are fetched for everything; statements, price history and EDGAR only for securities passing the market-data knockouts. Requests are paced: batches of 50, 2 s between batches, 30 s timeouts, up to 3 retries with 15/30/60 s backoff; transient failures are never cached.
+**Consequences:** A full run takes tens of minutes and survivors of the market knockouts form the peer universe. Everything is still recorded for the knocked-out names (quote snapshot), preserving survivorship history.
 
 ---
 
@@ -230,6 +235,8 @@ Run the data stage:
 python -m data.pipeline AAPL MSFT RUS.TO CCL-B.TO
 python -m data.pipeline --file symbols.txt --notes "weekly refresh"
 python -m data.pipeline --file symbols.txt --score   # + universe, factors, scores
+python -m data.pipeline --universe us,tsx,tsxv --score             # full listings (tens of minutes)
+python -m data.pipeline --universe tsx,tsxv --limit 300 --score    # quick random sample
 python -m screen.pipeline --top 25                   # re-score the latest run
 ```
 
