@@ -43,37 +43,47 @@ class RawCache:
         # {source: {"cached": n, "fetched": n}} for the run's freshness summary
         self.stats: dict[str, dict[str, int]] = {}
 
-    def _count(self, source: str, outcome: str) -> None:
+    def _count(self, source: str, outcome: str, n: int = 1) -> None:
         counts = self.stats.setdefault(source, {"cached": 0, "fetched": 0})
-        counts[outcome] += 1
+        counts[outcome] += n
 
     def _path(self, source: str, key: str, kind: str) -> Path:
         safe = re.sub(r"[^A-Za-z0-9._=-]", "_", key)
         return self.root / source / f"{safe}.{'parquet' if kind == 'frame' else 'json.gz'}"
 
-    def fetch(self, source: str, key: str, fetch: Callable[[], Any], kind: str = "json",
-              cacheable: Callable[[Any], bool] | None = None) -> Any:
-        """Return the cached response if fresh, else call `fetch` and cache it.
-        JSON is gzip-compressed (SEC companyfacts are several MB each). A response
-        failing `cacheable` (e.g. still holding transient errors) is not stored."""
+    def get(self, source: str, key: str, kind: str = "json") -> Any:
+        """Fresh cached value, or None."""
         path = self._path(source, key, kind)
-        ttl = self.ttl_hours.get(source, 24) * 3600
-        if path.exists() and time.time() - path.stat().st_mtime < ttl:
-            self._count(source, "cached")
-            if kind == "frame":
-                return pd.read_parquet(path)
-            with gzip.open(path, "rt") as f:
-                return json.load(f)
-        data = fetch()
-        self._count(source, "fetched")
-        if cacheable is not None and not cacheable(data):
-            return data
+        if not path.exists() or time.time() - path.stat().st_mtime >= (
+                self.ttl_hours.get(source, 24) * 3600):
+            return None
+        if kind == "frame":
+            return pd.read_parquet(path)
+        with gzip.open(path, "rt") as f:
+            return json.load(f)
+
+    def put(self, source: str, key: str, data: Any, kind: str = "json") -> None:
+        path = self._path(source, key, kind)
         path.parent.mkdir(parents=True, exist_ok=True)
         if kind == "frame":
             data.to_parquet(path, index=False)
         else:
             with gzip.open(path, "wt") as f:
                 json.dump(data, f, default=str)
+
+    def fetch(self, source: str, key: str, fetch: Callable[[], Any], kind: str = "json",
+              cacheable: Callable[[Any], bool] | None = None) -> Any:
+        """Return the cached response if fresh, else call `fetch` and cache it.
+        JSON is gzip-compressed (SEC companyfacts are several MB each). A response
+        failing `cacheable` (e.g. still holding transient errors) is not stored."""
+        cached = self.get(source, key, kind)
+        if cached is not None:
+            self._count(source, "cached")
+            return cached
+        data = fetch()
+        self._count(source, "fetched")
+        if cacheable is None or cacheable(data):
+            self.put(source, key, data, kind)
         return data
 
 
@@ -631,59 +641,90 @@ class YahooQueryClient:
         from yahooquery import Ticker
         return Ticker(symbols, **self.ticker_options)
 
-    def _modules_batch(self, batch: list[str]) -> dict:
-        data = self.pacing.call(lambda: self._ticker(batch).get_modules(list(YAHOO_MODULES)),
-                                f"quotes for {len(batch)} symbols")
-        data = data if isinstance(data, dict) else {}
-        for attempt in range(self.pacing.max_retries):
-            retry = [s for s in batch if s not in data or is_transient_error(data[s])]
-            if not retry:
-                break
-            self.pacing.sleep(self.pacing.backoff * 2 ** attempt)
-            again = self.pacing.call(
-                lambda r=retry: self._ticker(r).get_modules(list(YAHOO_MODULES)),
-                f"quote retry for {len(retry)} symbols")
-            if isinstance(again, dict):
-                data.update({k: v for k, v in again.items() if isinstance(v, dict)
-                             or k not in data})
-        return data
-
-    def modules(self, symbols: list[str]) -> dict[str, dict]:
-        out: dict[str, dict] = {}
-        batches = list(_chunks(symbols, self.batch_size))
+    def _per_symbol(self, symbols: list[str], key: str, what: str, kind: str,
+                    fetch_batch: Callable[[list[str]], dict[str, Any]]) -> dict[str, Any]:
+        """Cache per symbol, fetch only the misses in batches. `fetch_batch`
+        returns {symbol: value} holding only values worth caching; a symbol it
+        leaves out (failed batch, transient error) is fetched again next run."""
+        out: dict[str, Any] = {}
+        misses = []
+        for symbol in symbols:
+            hit = self.cache.get("yahooquery", f"{key}/{symbol}", kind)
+            if hit is None:
+                misses.append(symbol)
+            else:
+                out[symbol] = hit
+        self.cache._count("yahooquery", "cached", len(symbols) - len(misses))
+        batches = list(_chunks(misses, self.batch_size))
+        if misses:
+            log.info("%s: %d cached, fetching %d in %d batches", what,
+                     len(symbols) - len(misses), len(misses), len(batches))
         for i, batch in enumerate(batches):
-            if i % 20 == 0:
-                log.info("quotes: batch %d/%d", i + 1, len(batches))
-            data = self.cache.fetch(
-                "yahooquery", f"modules_{_digest(batch)}", lambda b=batch: self._modules_batch(b),
-                cacheable=lambda d: not any(is_transient_error(v) for v in d.values()))
-            out.update({s: d for s, d in data.items() if isinstance(d, dict)})
+            if i and i % 20 == 0:
+                log.info("%s: batch %d/%d", what, i + 1, len(batches))
+            try:
+                got = self.pacing.call(lambda b=batch: fetch_batch(b),
+                                       f"{what} for {len(batch)} symbols")
+            except Exception as e:  # noqa: BLE001 - keep going; these are refetched next run
+                log.warning("%s: batch of %d failed after retries: %s", what, len(batch), e)
+                continue
+            self.cache._count("yahooquery", "fetched", len(got))
+            for symbol, value in got.items():
+                self.cache.put("yahooquery", f"{key}/{symbol}", value, kind)
+                out[symbol] = value
         return out
 
+    def _modules_batch(self, batch: list[str]) -> dict:
+        """Quotes for a batch, retrying symbols that failed transiently. Returns
+        modules (dict) or permanent errors ("not found") only."""
+        pending, out = list(batch), {}
+        for attempt in range(self.pacing.max_retries + 1):
+            if attempt:
+                self.pacing.sleep(self.pacing.backoff * 2 ** (attempt - 1))
+                self.pacing.wait()
+            data = self._ticker(pending).get_modules(list(YAHOO_MODULES))
+            data = data if isinstance(data, dict) else {}
+            for symbol in pending:
+                value = data.get(symbol)
+                if isinstance(value, dict) or (value is not None
+                                               and not is_transient_error(value)):
+                    out[symbol] = value
+            pending = [s for s in pending if s not in out]
+            if not pending:
+                break
+        if pending:
+            log.warning("quotes: %d symbols still failing after retries (%s…); refetched "
+                        "next run", len(pending), ", ".join(pending[:5]))
+        return out
+
+    def modules(self, symbols: list[str]) -> dict[str, dict]:
+        data = self._per_symbol(symbols, "modules", "quotes", "json", self._modules_batch)
+        return {s: d for s, d in data.items() if isinstance(d, dict)}
+
     def _frames(self, symbols: list[str], key: str, call: Callable, what: str) -> pd.DataFrame:
-        frames = []
-        batches = list(_chunks(symbols, self.batch_size))
-        for i, batch in enumerate(batches):
-            if i % 20 == 0:
-                log.info("%s: batch %d/%d", what, i + 1, len(batches))
-            frames.append(self.cache.fetch(
-                "yahooquery", f"{key}_{_digest(batch)}",
-                lambda b=batch: self.pacing.call(lambda: call(b), f"{what} for {len(b)} symbols"),
-                kind="frame"))
-        frames = [f for f in frames if not f.empty]
+        def fetch_batch(batch: list[str]) -> dict[str, pd.DataFrame]:
+            df = call(batch)
+            # Only symbols present in the response are cached: one missing from a
+            # partial response is fetched again next run.
+            return {s: g.reset_index(drop=True) for s, g in df.groupby("symbol")}
+
+        frames = [f for f in self._per_symbol(symbols, key, what, "frame",
+                                              fetch_batch).values() if not f.empty]
         return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
     def financials(self, symbols: list[str], frequency: str) -> pd.DataFrame:
         def call(batch: list[str]) -> pd.DataFrame:
             df = self._ticker(batch).all_financial_data(frequency=frequency)
-            return df.reset_index() if isinstance(df, pd.DataFrame) else pd.DataFrame()
+            if not isinstance(df, pd.DataFrame):  # error text for the whole batch
+                raise RuntimeError(str(df)[:200])
+            return df.reset_index()
         return self._frames(symbols, f"financials_{frequency}", call, f"financials ({frequency})")
 
     def history(self, symbols: list[str], period: str, interval: str = "1d") -> pd.DataFrame:
         def call(batch: list[str]) -> pd.DataFrame:
             df = self._ticker(batch).history(period=period, interval=interval)
             if not isinstance(df, pd.DataFrame) or df.empty:
-                return pd.DataFrame()
+                raise RuntimeError(f"no price history for {len(batch)} symbols")
             df = df.reset_index()
             df["date"] = pd.to_datetime(df["date"].astype(str).str[:10])
             return df

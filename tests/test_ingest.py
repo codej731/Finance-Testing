@@ -300,26 +300,61 @@ def test_pacing_spaces_calls_and_retries_with_backoff():
             lambda: (_ for _ in ()).throw(TimeoutError()), "always fails")
 
 
+def _fake_ticker(responses, calls):
+    """Ticker stand-in: get_modules returns the next response for the batch."""
+    class FakeTicker:
+        def __init__(self, symbols, **_):
+            self.symbols = list(symbols)
+
+        def get_modules(self, _):
+            calls.append(self.symbols)
+            return responses.pop(0)(self.symbols)
+    return FakeTicker
+
+
 def test_transient_errors_are_retried_and_not_cached(tmp_path):
     from data.ingest import Pacing, RawCache, YahooQueryClient, is_transient_error
     assert is_transient_error("Invalid Crumb") and not is_transient_error(
         "Quote not found for symbol: X")
     calls = []
-
-    class FakeTicker:
-        def __init__(self, symbols, **_):
-            self.symbols = symbols
-
-        def get_modules(self, _):
-            calls.append(list(self.symbols))
-            first = len(calls) == 1
-            return {s: ("Invalid Crumb" if first and s == "B" else {"price": {}})
-                    for s in self.symbols}
-
+    ok = lambda syms: {s: {"price": {}} for s in syms}  # noqa: E731
     client = YahooQueryClient(RawCache(tmp_path, {}), 10, Pacing(sleep=lambda s: None))
-    client._ticker = FakeTicker
-    out = client.modules(["A", "B"])
-    assert set(out) == {"A", "B"} and calls == [["A", "B"], ["B"]]
+    client._ticker = _fake_ticker([
+        lambda syms: {**ok(syms), "B": "Invalid Crumb", "C": "Quote not found for symbol: C"},
+        ok], calls)
+    out = client.modules(["A", "B", "C"])
+    assert set(out) == {"A", "B"} and calls == [["A", "B", "C"], ["B"]]
+    # Second run: everything (including the permanent "not found") is cached.
+    client._ticker = _fake_ticker([], calls)
+    assert set(client.modules(["A", "B", "C"])) == {"A", "B"} and len(calls) == 2
+
+
+def test_empty_quote_batch_is_not_cached(tmp_path):
+    """Regression: a whole batch returning nothing was cached and skipped for 24 h."""
+    from data.ingest import Pacing, RawCache, YahooQueryClient
+    calls = []
+    client = YahooQueryClient(RawCache(tmp_path, {}), 10, Pacing(max_retries=1,
+                                                                  sleep=lambda s: None))
+    client._ticker = _fake_ticker([lambda syms: {}, lambda syms: {}], calls)
+    assert client.modules(["SBUX", "SCHW"]) == {}
+    client._ticker = _fake_ticker([lambda syms: {s: {"price": {}} for s in syms}], calls)
+    assert set(client.modules(["SBUX", "SCHW"])) == {"SBUX", "SCHW"}
+
+
+def test_frames_cached_per_symbol_and_only_misses_fetched(tmp_path):
+    from data.ingest import Pacing, RawCache, YahooQueryClient
+    client = YahooQueryClient(RawCache(tmp_path, {}), 2, Pacing(sleep=lambda s: None))
+    asked = []
+
+    def call(batch):
+        asked.append(list(batch))
+        return pd.DataFrame({"symbol": [s for s in batch if s != "C"], "x": 1.0})
+
+    first = client._frames(["A", "B", "C"], "fin", call, "financials")
+    assert sorted(first["symbol"]) == ["A", "B"] and asked == [["A", "B"], ["C"]]
+    second = client._frames(["A", "B", "C", "D"], "fin", call, "financials")
+    assert asked[2:] == [["C", "D"]]            # A, B from cache; C (absent) retried
+    assert sorted(second["symbol"]) == ["A", "B", "D"]
 
 
 def test_cache_skips_uncacheable_responses(tmp_path):
