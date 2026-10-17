@@ -147,8 +147,8 @@ point-in-time as of the run date.
   Opening balances (average invested capital, dilution) come from the FY or
   quarter ending within 20 days of one year earlier.
 - **Formulas:** schema §4. Growth and margin stability use fiscal years only.
-- **Exceptions:** missing debt / minority interest = 0 when a balance sheet
-  exists (D-013); ratios with a denominator ≤ 0 are null (D-014).
+- **Exceptions:** missing debt / minority interest / cash = 0 when a balance
+  sheet exists (D-013); ratios with a denominator ≤ 0 are null (D-014).
 - **Deliberate infinities:** interest coverage when interest is below
   `factors.immaterial_interest_pct_revenue` of revenue or there is no debt;
   cash runway when FCF ≥ 0. They rank at the top.

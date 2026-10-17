@@ -81,6 +81,12 @@ def test_missing_debt_is_zero_when_balance_sheet_reported():
     assert f["debt"] == 0 and f["enterprise_value"] == pytest.approx(1500 - 100)
 
 
+def test_missing_cash_is_zero_when_balance_sheet_reported():
+    f = factors_for(*panels(cash=np.nan))
+    assert f["cash"] == 0 and f["enterprise_value"] == pytest.approx(1500 + 400)
+    assert f["roic"] == pytest.approx(280 * 0.75 / np.mean([1600, 1500]))  # opening had cash
+
+
 def test_missing_debt_stays_null_without_balance_sheet():
     f = factors_for(*panels(total_debt=np.nan, total_assets=np.nan))
     assert np.isnan(f["debt"]) and np.isnan(f["enterprise_value"])

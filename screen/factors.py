@@ -5,8 +5,9 @@ Fundamentals arrive as wide panels already converted to each security's
 trading currency, so market-vs-fundamental ratios never mix currencies.
 
 Two rules apply throughout:
-- D-013: a missing debt or minority-interest line counts as 0 when the
-  balance sheet was reported (debt-free companies would otherwise get no EV).
+- D-013: a missing debt, minority-interest or cash line counts as 0 when the
+  balance sheet was reported (debt-free or cash-free companies would otherwise
+  get no EV or ROIC).
 - D-014: a ratio whose denominator is zero or negative is null, never ±inf.
   The only infinities are deliberate "best possible" values: interest coverage
   when interest is immaterial and cash runway when free cash flow is positive.
@@ -66,14 +67,14 @@ def base_period(fy: pd.DataFrame, ttm: pd.DataFrame) -> pd.Series | None:
     return latest_fy
 
 
-def _capital(row: pd.Series | None, missing_debt_is_zero: bool) -> dict[str, float]:
-    """Debt, minority interest, invested capital for one balance-sheet row."""
-    debt, mi = _val(row, "total_debt"), _val(row, "minority_interest")
-    if missing_debt_is_zero and not np.isnan(_val(row, "total_assets")):
-        debt = 0.0 if np.isnan(debt) else debt
-        mi = 0.0 if np.isnan(mi) else mi
-    ic = debt + _val(row, "total_equity") + mi - _val(row, "cash")
-    return {"debt": debt, "minority_interest": mi, "invested_capital": ic}
+def _capital(row: pd.Series | None, missing_is_zero: bool) -> dict[str, float]:
+    """Debt, minority interest, cash and invested capital for one balance-sheet row."""
+    debt, mi, cash = (_val(row, "total_debt"), _val(row, "minority_interest"),
+                      _val(row, "cash"))
+    if missing_is_zero and not np.isnan(_val(row, "total_assets")):  # D-013
+        debt, mi, cash = (0.0 if np.isnan(v) else v for v in (debt, mi, cash))
+    ic = debt + _val(row, "total_equity") + mi - cash
+    return {"debt": debt, "minority_interest": mi, "cash": cash, "invested_capital": ic}
 
 
 # ---------------------------------------------------------------------------
@@ -86,7 +87,7 @@ def fundamental_factors(fy: pd.DataFrame, q: pd.DataFrame, ttm: pd.DataFrame,
     base = base_period(fy, ttm)
     if base is None:
         return {}
-    zero_debt = cfg.get("factors.missing_debt_is_zero", True)
+    zero_debt = cfg.get("factors.missing_balance_is_zero", True)
     lo, hi = cfg.get("tax.clip", [0.0, 0.40])
     rates = cfg.get("tax.statutory_rates", {})
     statutory = rates.get(COUNTRY_TAX_KEYS.get(country, ""), rates.get("default", 0.25))
@@ -110,7 +111,7 @@ def fundamental_factors(fy: pd.DataFrame, q: pd.DataFrame, ttm: pd.DataFrame,
     ocf, capex = _val(base, "operating_cash_flow"), _val(base, "capex")
     fcf = ocf - capex
     net_income = _val(base, "net_income")
-    cash = _val(base, "cash")
+    cash = close["cash"]
     interest = _val(base, "interest_expense")
     immaterial = cfg.get("factors.immaterial_interest_pct_revenue", 0.001)
 
@@ -148,7 +149,7 @@ def fundamental_factors(fy: pd.DataFrame, q: pd.DataFrame, ttm: pd.DataFrame,
         "base_period_type": base["period_type"], "base_period_end": base["period_end"],
         "currency": base["currency"],
         "revenue": revenue, "ebit": ebit, "ebitda": ebitda, "tax_rate": tax_rate,
-        "nopat": nopat, "fcf": fcf, "cash": cash, **close, "avg_invested_capital": avg_ic,
+        "nopat": nopat, "fcf": fcf, **close, "avg_invested_capital": avg_ic,
         "net_debt": close["debt"] - cash,
         "roic": _div(nopat, avg_ic),
         "operating_margin": _div(ebit, revenue),

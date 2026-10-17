@@ -193,7 +193,7 @@ yfinance uses the same names as yahooquery with spaces (`TotalRevenue` → `Tota
 |---|---|---|---|
 | `operating_cash_flow` | | `OperatingCashFlow` | `NetCashProvidedByUsedInOperatingActivities` |
 | `capex` | Positive magnitude | `CapitalExpenditure` (negate) | `PaymentsToAcquirePropertyPlantAndEquipment` |
-| `depreciation_amortization` | | `DepreciationAndAmortization`, `ReconciledDepreciation` | `DepreciationDepletionAndAmortization` |
+| `depreciation_amortization` | Including depletion | `DepreciationAmortizationDepletion` → `DepreciationAndAmortization` → `ReconciledDepreciation` | `DepreciationDepletionAndAmortization` |
 | `sbc` | Stock-based compensation | `StockBasedCompensation` | `ShareBasedCompensation` |
 | `buybacks` | Positive magnitude | `RepurchaseOfCapitalStock` (negate) | `PaymentsForRepurchaseOfCommonStock` |
 | `dividends_paid` | Positive magnitude | `CashDividendsPaid` (negate) | `PaymentsOfDividends`, `PaymentsOfDividendsCommonStock` |

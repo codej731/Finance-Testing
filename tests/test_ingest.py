@@ -113,6 +113,13 @@ def test_yahoo_total_debt_excludes_leases():
     assert _value(df, "total_debt", "FY", "2023-12-31")["value"] == 7e7
 
 
+def test_yahoo_depreciation_includes_depletion():
+    raw = fixtures.yahoo_financials("A", "USD", ["2023-12-31"], [])
+    raw["DepreciationAndAmortization"], raw["DepreciationAmortizationDepletion"] = 1e6, 3e8
+    df = normalize_yahoo_statements(raw, {"A": "XNAS:A"}, {"XNAS:A": "US"}, LAGS, NOW)
+    assert _value(df, "depreciation_amortization", "FY", "2023-12-31")["value"] == 3e8
+
+
 def test_yahoo_total_debt_needs_long_term_debt():
     # Yahoo sometimes has only CurrentDebt for a year; that is not total debt.
     raw = fixtures.yahoo_financials("A", "USD", ["2023-12-31"], [])

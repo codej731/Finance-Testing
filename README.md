@@ -158,9 +158,9 @@ Each entry records a methodology choice, why it was made, and what it costs. New
 **Decision:** All sources are stored; when reading, each field of each period takes the highest-priority non-null value.
 **Consequences:** Nothing is lost and conflicts are auditable, but a single period can mix sources; the balance-identity and source-conflict checks flag bad combinations.
 
-### D-013 · Missing debt and minority interest count as zero when a balance sheet exists — 2026-10-17
-**Context:** Debt-free companies (Franco-Nevada, most explorers) have no debt line at all, so under D-006 their enterprise value, ROIC and leverage were null.
-**Decision:** Exception to D-006: when `total_assets` is reported, a missing `total_debt` or `minority_interest` is 0. Without a balance sheet they stay null. Configurable (`factors.missing_debt_is_zero`).
+### D-013 · Missing debt, minority interest and cash count as zero when a balance sheet exists — 2026-10-17
+**Context:** Debt-free companies (Franco-Nevada, most explorers) have no debt line, and some (Tourmaline) have no cash line, so under D-006 their enterprise value, ROIC and leverage were null.
+**Decision:** Exception to D-006: when `total_assets` is reported, a missing `total_debt`, `minority_interest` or `cash` is 0. Without a balance sheet they stay null. Configurable (`factors.missing_balance_is_zero`).
 **Consequences:** EV-based factors exist for debt-free companies; a vendor that simply omits a real debt line would understate EV, which the source-conflict check can surface for US names.
 
 ### D-014 · Ratios with a zero or negative denominator are null — 2026-10-17

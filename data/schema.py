@@ -132,7 +132,10 @@ FIELDS: dict[str, FieldDef] = {f.name: f for f in [
     FieldDef("capex", "cashflow", "flow", sign="magnitude", yahoo=_alts("CapitalExpenditure"),
              xbrl=_alts("us-gaap:PaymentsToAcquirePropertyPlantAndEquipment")),
     FieldDef("depreciation_amortization", "cashflow", "flow",
-             yahoo=_alts("DepreciationAndAmortization", "ReconciledDepreciation"),
+             # Depletion included: for miners and royalty companies it is most of
+             # the charge (WPM 2025: D&A $1.3M, with depletion $305M).
+             yahoo=_alts("DepreciationAmortizationDepletion", "DepreciationAndAmortization",
+                         "ReconciledDepreciation"),
              xbrl=_alts("us-gaap:DepreciationDepletionAndAmortization")),
     FieldDef("sbc", "cashflow", "flow", sign="magnitude", yahoo=_alts("StockBasedCompensation"),
              xbrl=_alts("us-gaap:ShareBasedCompensation")),

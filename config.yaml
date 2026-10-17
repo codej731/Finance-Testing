@@ -107,9 +107,10 @@ peers:
   min_peer_count: 5
 
 factors:
-  # D-013: a missing debt or minority-interest line is 0 when the balance sheet
-  # was reported (total_assets present). Debt-free companies otherwise get no EV.
-  missing_debt_is_zero: true
+  # D-013: a missing debt, minority-interest or cash line is 0 when the balance
+  # sheet was reported (total_assets present). Otherwise debt-free or cash-free
+  # companies get no EV or ROIC.
+  missing_balance_is_zero: true
   # Interest expense below this share of revenue is immaterial: coverage is
   # ranked at the top instead of computed (schema §4).
   immaterial_interest_pct_revenue: 0.001
