@@ -82,6 +82,19 @@ def test_edgar_cash_adds_optional_marketable_securities(edgar):
     assert _value(edgar, "cash", "Q", "2023-12-31")["value"] == 90
 
 
+def test_edgar_zero_does_not_block_later_tag():
+    facts = fixtures.edgar_companyfacts()
+    g = facts["facts"]["us-gaap"]
+    g["RevenueFromContractWithCustomerExcludingAssessedTax"] = {"units": {"USD": [
+        {"val": 4700, "start": "2023-10-01", "end": "2024-09-30", "filed": "2024-11-15",
+         "form": "10-K", "accn": "A-24K"}]}}
+    for fact in g["Revenues"]["units"]["USD"]:
+        if fact["end"] == "2024-09-30" and fact.get("start") == "2023-10-01":
+            fact["val"] = 0
+    df = normalize_edgar_companyfacts(facts, "XNAS:TST", NOW)
+    assert _value(df, "revenue", "FY", "2024-09-30")["value"] == 4700
+
+
 def test_edgar_cover_page_shares_attach_to_report_period(edgar):
     fy = _value(edgar, "shares_outstanding", "FY", "2024-09-30")
     assert fy["value"] == 1_000_000 and fy["currency"] == "USD"
@@ -249,6 +262,7 @@ def test_parse_us_listing():
         "Y|XYZ$A|Xyz Preferred Series A|N| |N|100|N||XYZ-A|XYZ$A|N",
         "Y|TSM|Taiwan Semiconductor American Depositary Shares|N| |N|100|N||TSM|TSM|N",
         "Y|ZZZT|Test Co|Q|Q|N|100|Y|N||ZZZT|N",
+        "Y|FACT|FACT II Acquisition Corp - Class A Ordinary Shares|Q|Q|N|100|N|N||FACT|N",
     ])
     df = parse_us_listing(text)
     assert list(df["yahoo_symbol"]) == ["AAPL", "BRK-B"]

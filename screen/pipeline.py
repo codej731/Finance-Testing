@@ -125,7 +125,8 @@ def print_result(result: ScreenResult, top: int) -> None:
         # Composites are relative to each segment's own peers: one table each.
         with pd.option_context("display.width", 200, "display.max_colwidth", 30,
                                "display.float_format", "{:.2f}".format):
-            for group, rows in result.ranking.groupby("group", sort=False):
+            scored = result.ranking.dropna(subset=["composite"])
+            for group, rows in scored.groupby("group", sort=False):
                 print(f"\n{group} — top {min(top, len(rows))} of {len(rows)}:")
                 print(rows[cols].head(top).to_string())
 

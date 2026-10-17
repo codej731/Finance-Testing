@@ -113,14 +113,13 @@ def test_runway_counts_operating_burn_only():
 
 def test_royalty_capex_is_an_acquisition():
     big_stream = dict(operating_cash_flow=300.0, capex=5000.0)
-    f = factors_for(*panels(**big_stream), ticker="WPM")
+    f = factors_for(*panels(sid="XTSE:WPM", **big_stream), sid="XTSE:WPM", ticker="WPM")
     assert f["business_model"] == "royalty"
     assert f["fcf"] == 300 and f["fcf_yield"] == pytest.approx(300 / 1500)
     assert f["fcf_conversion"] == pytest.approx(300 / 135)
-    # Ticker entries match on any exchange.
-    f = factors_for(*panels(sid="XNYS:WPM", **big_stream), sid="XNYS:WPM", ticker="WPM")
-    assert f["fcf"] == 300
-    assert factors_for(*panels(**big_stream), ticker="ABX")["business_model"] == "operating"
+    # Listed by security ID: Organon (NYSE: OGN) is not Orogen (TSX-V: OGN).
+    organon = factors_for(*panels(sid="XNYS:OGN", **big_stream), sid="XNYS:OGN", ticker="OGN")
+    assert organon["business_model"] == "operating"
 
 
 def test_statutory_tax_when_pretax_loss():

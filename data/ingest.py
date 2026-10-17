@@ -594,7 +594,11 @@ def normalize_edgar_companyfacts(companyfacts: dict, security_id: str,
                 [(_edgar_tag_series(companyfacts, tag, name, fy_ends, period_ends, accn_end),
                   optional, sign) for tag, optional, sign in map(parse_component, alternative)])
             for key, hit in (combined or {}).items():
-                best.setdefault(key, hit)
+                # A zero in a higher-priority tag does not block a real value in a
+                # later one (some filers tag Revenues = 0 beside their actual
+                # RevenueFromContractWithCustomer… figure).
+                if key not in best or (best[key][0] == 0 and hit[0] != 0):
+                    best[key] = hit
         rows.extend((name, ptype, pend, value, filed, unit)
                     for (ptype, pend), (value, filed, unit) in best.items())
     if not rows:
@@ -875,11 +879,12 @@ NASDAQ_EXCHANGES = {"Q": "NASDAQ", "N": "NYSE", "A": "NYSEAMERICAN", "P": "NYSEA
 # Not common equity. Yahoo's quoteType (must be EQUITY) is the final check;
 # these name patterns only avoid fetching obvious non-equities.
 US_EXCLUDE = re.compile(r"warrant|\bunits?\b|\brights?\b|preferred|\bnotes?\b|debenture"
-                        r"|\bfund\b|\bETN\b|beneficial (?:interest|ownership)", re.I)
+                        r"|\bfund\b|\bETN\b|beneficial (?:interest|ownership)"
+                        r"|acquisition corp|\bphysical\b", re.I)
 ADR_PATTERN = re.compile(r"depositary|\bADR\b|\bADS\b", re.I)
 TMX_EXCLUDE = re.compile(r"\bETFs?\b|\bfunds?\b|\bfd\b|index|portfolio|\bbonds?\b|\bbnd\b"
                          r"|covered call|\bcov\b|split corp|bitcoin|ether|\bpr\b|pref|\bCDR\b"
-                         r"|depositary receipt|\bETP\b", re.I)
+                         r"|depositary receipt|\bETP\b|acquisition corp|\bphysical\b", re.I)
 # TMX suffixes kept: share classes and trust units. Dropped: .U (USD-quoted
 # duplicate line), .PR.* preferreds, .DB debentures, .WT warrants, .P capital
 # pool shells (TSX-V), and the letter series used by ETFs (.F, .T, …).

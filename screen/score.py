@@ -121,7 +121,8 @@ def score(factors: pd.DataFrame, securities: pd.DataFrame, cfg) -> pd.DataFrame:
             return "universe"
         if seg == "royalty":
             return "segment:royalty"
-        return f"segment:{seg}|sector:{sector.get(sid) or '?'}"
+        sec = sector.get(sid)
+        return f"segment:{seg}|sector:{sec if isinstance(sec, str) else 'unknown sector'}"
 
     composite_rows = composite.rename("percentile").reset_index()
     composite_rows["peer_group"] = composite_rows["security_id"].map(composite_group)

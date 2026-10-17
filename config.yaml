@@ -145,9 +145,11 @@ factors:
   insider_window_days: 182
   # D-017: royalty and streaming companies. Their capex is mostly buying new
   # streams (an acquisition), so free cash flow = operating cash flow. Yahoo
-  # labels them by metal ("Gold"), hence a list. Entries are tickers (any
-  # exchange) or security IDs.
-  royalty_companies: [FNV, WPM, OR, RGLD, TFPM, OGN, MTA, EMX, ALS, SAND, MMX, VOXR]
+  # labels them by metal ("Gold"), hence a list. Use security IDs: bare tickers
+  # collide across exchanges (OGN is Orogen on TSX-V but Organon on NYSE).
+  royalty_companies: [XTSE:FNV, XNYS:FNV, XTSE:WPM, XNYS:WPM, XTSE:OR, XNYS:OR,
+                      XNAS:RGLD, XTSE:TFPM, XNYS:TFPM, XTSX:OGN, XTSX:MTA, XASE:MTA,
+                      XTSX:EMX, XASE:EMX, XTSE:ALS, XNAS:VOXR, XTSE:VOXR, XTSX:MMX]
 
 scoring:
   # Composite = weighted mean of category scores; a category score is the mean
