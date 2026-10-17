@@ -114,8 +114,13 @@ factors:
   # Interest expense below this share of revenue is immaterial: coverage is
   # ranked at the top instead of computed (schema §4).
   immaterial_interest_pct_revenue: 0.001
-  # Window for insider buying and for share dilution.
+  # Window for insider buying.
   insider_window_days: 182
+  # D-017: royalty and streaming companies. Their capex is mostly buying new
+  # streams (an acquisition), so free cash flow = operating cash flow. Yahoo
+  # labels them by metal ("Gold"), hence a list. Entries are tickers (any
+  # exchange) or security IDs.
+  royalty_companies: [FNV, WPM, OR, RGLD, TFPM, OGN, MTA, EMX, ALS, SAND, MMX, VOXR]
 
 scoring:
   # Composite = weighted mean of category scores; a category score is the mean

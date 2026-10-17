@@ -48,8 +48,8 @@ def panels(sid="X", **overrides):
     return fy, empty, empty
 
 
-def factors_for(fy, q, ttm, mcap=1500.0, sid="X"):
-    secs = pd.DataFrame([{"security_id": sid, "country": "Canada"}])
+def factors_for(fy, q, ttm, mcap=1500.0, sid="X", ticker="X"):
+    secs = pd.DataFrame([{"security_id": sid, "ticker": ticker, "country": "Canada"}])
     market = pd.DataFrame([{"security_id": sid, "market_cap": mcap, "price": 15.0,
                             "shares_outstanding": 100.0}])
     none = pd.DataFrame()
@@ -102,6 +102,25 @@ def test_non_positive_denominators_are_null_not_infinite():
         assert np.isnan(f[name]), name
     assert f["cash_runway_years"] == pytest.approx(100 / 50)    # cash / burn
     assert f["interest_coverage"] == np.inf                     # debt-free
+
+
+def test_runway_counts_operating_burn_only():
+    # Cash-generating operations funding a big project are self-funding...
+    f = factors_for(*panels(operating_cash_flow=300.0, capex=5000.0))
+    assert f["cash_runway_years"] == np.inf
+    assert f["fcf_yield"] == pytest.approx(-4700 / 1500)       # FCF still counts the capex
+
+
+def test_royalty_capex_is_an_acquisition():
+    big_stream = dict(operating_cash_flow=300.0, capex=5000.0)
+    f = factors_for(*panels(**big_stream), ticker="WPM")
+    assert f["business_model"] == "royalty"
+    assert f["fcf"] == 300 and f["fcf_yield"] == pytest.approx(300 / 1500)
+    assert f["fcf_conversion"] == pytest.approx(300 / 135)
+    # Ticker entries match on any exchange.
+    f = factors_for(*panels(sid="XNYS:WPM", **big_stream), sid="XNYS:WPM", ticker="WPM")
+    assert f["fcf"] == 300
+    assert factors_for(*panels(**big_stream), ticker="ABX")["business_model"] == "operating"
 
 
 def test_statutory_tax_when_pretax_loss():

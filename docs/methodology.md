@@ -151,7 +151,12 @@ point-in-time as of the run date.
   sheet exists (D-013); ratios with a denominator ≤ 0 are null (D-014).
 - **Deliberate infinities:** interest coverage when interest is below
   `factors.immaterial_interest_pct_revenue` of revenue or there is no debt;
-  cash runway when FCF ≥ 0. They rank at the top.
+  cash runway when operating cash flow ≥ 0. They rank at the top.
+- **Cash runway** (D-017) = cash ÷ (capex − operating cash flow) for companies
+  whose operations burn cash; a cash-generating company is self-funding even
+  while spending heavily on growth.
+- **Royalty / streaming companies** (`factors.royalty_companies`, D-017):
+  free cash flow = operating cash flow, since their capex is buying new streams.
 - **Insider buying:** open-market buys minus sales by officers and directors
   over `factors.insider_window_days`, as a share of market cap; null when the
   vendor has no insider records for the company.

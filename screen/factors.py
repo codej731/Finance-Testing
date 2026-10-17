@@ -10,7 +10,10 @@ Two rules apply throughout:
   get no EV or ROIC).
 - D-014: a ratio whose denominator is zero or negative is null, never ±inf.
   The only infinities are deliberate "best possible" values: interest coverage
-  when interest is immaterial and cash runway when free cash flow is positive.
+  when interest is immaterial and cash runway when operations generate cash.
+- D-017: cash runway measures operating burn only, and royalty / streaming
+  companies (factors.royalty_companies) treat stream purchases as
+  acquisitions, so their free cash flow is operating cash flow.
 """
 
 from __future__ import annotations
@@ -81,8 +84,14 @@ def _capital(row: pd.Series | None, missing_is_zero: bool) -> dict[str, float]:
 # Per-security factors
 # ---------------------------------------------------------------------------
 
+def is_royalty(security: pd.Series, cfg) -> bool:
+    """Listed in factors.royalty_companies, by security_id (XTSE:FNV) or ticker (FNV)."""
+    listed = set(cfg.get("factors.royalty_companies", []) or [])
+    return security.get("security_id") in listed or security.get("ticker") in listed
+
+
 def fundamental_factors(fy: pd.DataFrame, q: pd.DataFrame, ttm: pd.DataFrame,
-                        country: str | None, cfg) -> dict[str, float]:
+                        country: str | None, cfg, royalty: bool = False) -> dict[str, float]:
     """Quality, risk and fundamental inputs for one security."""
     base = base_period(fy, ttm)
     if base is None:
@@ -109,7 +118,8 @@ def fundamental_factors(fy: pd.DataFrame, q: pd.DataFrame, ttm: pd.DataFrame,
     avg_ic = float(np.mean(ics)) if ics else np.nan
 
     ocf, capex = _val(base, "operating_cash_flow"), _val(base, "capex")
-    fcf = ocf - capex
+    # Royalty / streaming "capex" is buying new streams: an acquisition, not upkeep.
+    fcf = ocf if royalty else ocf - capex
     net_income = _val(base, "net_income")
     cash = close["cash"]
     interest = _val(base, "interest_expense")
@@ -130,10 +140,14 @@ def fundamental_factors(fy: pd.DataFrame, q: pd.DataFrame, ttm: pd.DataFrame,
         coverage = np.inf  # no debt, no interest line
     else:
         coverage = _div(ebit, interest)
-    if np.isnan(fcf):
+    # Runway measures operating burn: a company whose operations generate cash is
+    # self-funding even while it spends heavily on growth (D-017).
+    if np.isnan(ocf):
         runway = np.nan
+    elif ocf >= 0:
+        runway = np.inf
     else:
-        runway = np.inf if fcf >= 0 else _div(cash, -fcf)  # positive FCF: self-funding
+        runway = _div(cash, capex - ocf)
 
     shares_now, shares_then = (_val(base, "shares_outstanding"),
                                _val(opening_row, "shares_outstanding"))
@@ -146,6 +160,7 @@ def fundamental_factors(fy: pd.DataFrame, q: pd.DataFrame, ttm: pd.DataFrame,
         z2 = np.nan
 
     return {
+        "business_model": "royalty" if royalty else "operating",
         "base_period_type": base["period_type"], "base_period_end": base["period_end"],
         "currency": base["currency"],
         "revenue": revenue, "ebit": ebit, "ebitda": ebitda, "tax_rate": tax_rate,
@@ -235,7 +250,8 @@ def compute_factors(securities: pd.DataFrame, market: pd.DataFrame,
     for _, sec in securities.iterrows():
         sid = sec["security_id"]
         f = fundamental_factors(fy_g.get(sid, empty), q_g.get(sid, empty),
-                                ttm_g.get(sid, empty), sec.get("country"), cfg)
+                                ttm_g.get(sid, empty), sec.get("country"), cfg,
+                                royalty=is_royalty(sec, cfg))
         mcap = market_cap(mkt.loc[sid]) if sid in mkt.index else np.nan
         rows.append({
             "security_id": sid, **f, **valuation_factors(f, mcap),

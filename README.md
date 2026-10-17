@@ -178,6 +178,11 @@ Each entry records a methodology choice, why it was made, and what it costs. New
 **Decision:** Interim: with fewer than `peers.min_peer_count` non-null values in the industry, a factor is ranked against the whole sector, then the universe. The peer group used is stored with each score. Own-history comparison arrives with relative valuation (`value/relative.py`).
 **Consequences:** Thin industries (e.g. Silver, Uranium) are ranked against broader peers until the universe grows.
 
+### D-017 · Cash runway measures operating burn; royalty stream purchases are acquisitions — 2026-10-17
+**Context:** Wheaton spent $4.5B on new streams in one quarter, recorded as capex. Trailing FCF went to −$2.9B and cash runway to 0.03 years, as if the company were about to run out of cash.
+**Decision:** Cash runway is infinite when operating cash flow is positive; otherwise cash ÷ (capex − operating cash flow). Royalty and streaming companies listed in `factors.royalty_companies` (tickers or security IDs; Yahoo labels them by metal) use free cash flow = operating cash flow, because their capex is buying new streams.
+**Consequences:** Runway flags only companies whose operations burn cash (explorers, developers). The royalty list is maintained by hand.
+
 ---
 
 ## Known limitations
