@@ -2,6 +2,7 @@
 
     python -m data.pipeline AAPL MSFT RUS.TO CCL-B.TO
     python -m data.pipeline --file symbols.txt --notes "weekly refresh"
+    python -m data.pipeline --file symbols.txt --score     # then universe + scores
 """
 
 from __future__ import annotations
@@ -47,13 +48,17 @@ class Clients:
     fx: object | None = None
 
 
-def build_clients(cfg: Config) -> Clients:
-    cache = RawCache(cfg.resolve_path("paths.cache"), cfg.get("cache_ttl_hours", {}))
+def build_fx(cfg: Config, cache: RawCache | None = None):
+    cache = cache or RawCache(cfg.resolve_path("paths.cache"), cfg.get("cache_ttl_hours", {}))
     static = StaticFx(cfg.get("fx.static_rates", {}))
     if cfg.get("fx.provider") == "static":
-        fx = static
-    else:
-        fx = YahooFx(cache, fallback=static if cfg.get("fx.allow_static_fallback") else None)
+        return static
+    return YahooFx(cache, fallback=static if cfg.get("fx.allow_static_fallback") else None)
+
+
+def build_clients(cfg: Config) -> Clients:
+    cache = RawCache(cfg.resolve_path("paths.cache"), cfg.get("cache_ttl_hours", {}))
+    fx = build_fx(cfg, cache)
     user_agent = cfg.get("sec.user_agent") or ""
     edgar = (EdgarClient(cache, user_agent, cfg.get("sec.request_interval", 0.15))
              if user_agent else None)
@@ -200,6 +205,9 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--file", type=Path, help="file with one Yahoo symbol per line")
     parser.add_argument("--config", type=Path, default=None)
     parser.add_argument("--notes", default=None)
+    parser.add_argument("--score", action="store_true",
+                        help="run the screen stage (universe, factors, scores) afterwards")
+    parser.add_argument("--top", type=int, default=20, help="rows to print with --score")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
@@ -210,7 +218,11 @@ def main(argv: list[str] | None = None) -> None:
     if not symbols:
         parser.error("no symbols given")
 
-    result = run_ingest(sorted(set(symbols)), load_config(args.config), notes=args.notes)
+    cfg = load_config(args.config)
+    store = Store(cfg.resolve_path("paths.db"), cfg.resolve_path("paths.snapshots"))
+    clients = build_clients(cfg)
+    result = run_ingest(sorted(set(symbols)), cfg, store=store, clients=clients,
+                        notes=args.notes)
     print(f"run {result.run_id}: {len(result.security_ids)} securities, "
           f"{len(result.universe)} passed validation")
     if not result.report.issues.empty:
@@ -219,6 +231,10 @@ def main(argv: list[str] | None = None) -> None:
     for err in result.errors:
         print(f"error: {err}")
     print(f"snapshot: {result.snapshot_path}")
+    if args.score and result.security_ids:
+        from screen.pipeline import print_result, run_screen
+        print()
+        print_result(run_screen(store, cfg, clients.fx, result.run_id), args.top)
 
 
 if __name__ == "__main__":

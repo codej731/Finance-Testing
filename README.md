@@ -158,6 +158,26 @@ Each entry records a methodology choice, why it was made, and what it costs. New
 **Decision:** All sources are stored; when reading, each field of each period takes the highest-priority non-null value.
 **Consequences:** Nothing is lost and conflicts are auditable, but a single period can mix sources; the balance-identity and source-conflict checks flag bad combinations.
 
+### D-013 · Missing debt and minority interest count as zero when a balance sheet exists — 2026-10-17
+**Context:** Debt-free companies (Franco-Nevada, most explorers) have no debt line at all, so under D-006 their enterprise value, ROIC and leverage were null.
+**Decision:** Exception to D-006: when `total_assets` is reported, a missing `total_debt` or `minority_interest` is 0. Without a balance sheet they stay null. Configurable (`factors.missing_debt_is_zero`).
+**Consequences:** EV-based factors exist for debt-free companies; a vendor that simply omits a real debt line would understate EV, which the source-conflict check can surface for US names.
+
+### D-014 · Ratios with a zero or negative denominator are null — 2026-10-17
+**Context:** Pre-revenue explorers produced −∞ operating margins and meaningless EV/EBIT.
+**Decision:** Any ratio whose denominator is ≤ 0 is null. The only infinities are deliberate best-case values: interest coverage when interest is immaterial or there is no debt, and cash runway when free cash flow is positive. A category score needs at least half its factors (`scoring.min_factor_share`), so explorers are scored on expectations, price and risk (runway, dilution, Z'') rather than on a lone FCF yield.
+**Consequences:** Explorers and producers share one composite built from different evidence; compare them with that in mind.
+
+### D-015 · Universe thresholds in USD and on traded value — 2026-10-17
+**Context:** v0 thresholds were per listing currency and on share volume; 50k shares/day means very different things for a $0.40 explorer and a $400 stock.
+**Decision:** Market cap and liquidity are converted to `universe.currency` (USD) at the latest FX rate; liquidity is 3-month average volume × price. Quotes older than `universe.max_quote_age_days` are knocked out (halted or delisted names).
+**Consequences:** Thresholds are comparable across TSX, TSX-V and US listings.
+
+### D-016 · Peer fallback goes to the sector, then the universe — 2026-10-17
+**Context:** D-002 calls for own-history comparison when an industry has too few peers, which needs a history of factor values per company that does not exist yet.
+**Decision:** Interim: with fewer than `peers.min_peer_count` non-null values in the industry, a factor is ranked against the whole sector, then the universe. The peer group used is stored with each score. Own-history comparison arrives with relative valuation (`value/relative.py`).
+**Consequences:** Thin industries (e.g. Silver, Uranium) are ranked against broader peers until the universe grows.
+
 ---
 
 ## Known limitations
@@ -168,7 +188,7 @@ Each entry records a methodology choice, why it was made, and what it costs. New
 
 ## Roadmap
 - [ ] **v1.0** Data layer: canonical schema, validation, snapshot storage, config file *(implemented; first live run 2026-10-17 on AAPL, MSFT, RUS.TO, BAM.TO)*
-- [ ] **v1.1** Universe knockouts + factor scoring + composite
+- [ ] **v1.1** Universe knockouts + factor scoring + composite *(implemented; first run 2026-10-17 on 54 TSX / TSX-V / US names)*
 - [ ] **v1.2** Reverse DCF
 - [ ] **v1.3** One-page tear sheet per ticker
 - [ ] **v1.4** Diagnosis module
@@ -194,6 +214,8 @@ Run the data stage:
 ```bash
 python -m data.pipeline AAPL MSFT RUS.TO CCL-B.TO
 python -m data.pipeline --file symbols.txt --notes "weekly refresh"
+python -m data.pipeline --file symbols.txt --score   # + universe, factors, scores
+python -m screen.pipeline --top 25                   # re-score the latest run
 ```
 
 This writes `store/engine.duckdb`, `snapshots/{run_id}/*.parquet` and `cache/raw/` (all git-ignored). Reading fundamentals:

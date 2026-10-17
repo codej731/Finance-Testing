@@ -315,6 +315,10 @@ TABLES: dict[str, Table] = {t.name: t for t in [
         ("severity", "VARCHAR"), ("field", "VARCHAR"), ("period_type", "VARCHAR"),
         ("period_end", "DATE"), ("detail", "VARCHAR"),
     )),
+    Table("universe_membership", (
+        ("run_id", "VARCHAR"), ("security_id", "VARCHAR"), ("passed", "BOOLEAN"),
+        ("reason", "VARCHAR"), ("market_cap_ref", "DOUBLE"), ("dollar_volume_ref", "DOUBLE"),
+    ), ("run_id", "security_id")),
     Table("factor_scores", (
         ("run_id", "VARCHAR"), ("security_id", "VARCHAR"), ("factor", "VARCHAR"),
         ("raw_value", "DOUBLE"), ("peer_group", "VARCHAR"), ("peer_count", "INTEGER"),
@@ -344,4 +348,4 @@ TABLES: dict[str, Table] = {t.name: t for t in [
 
 # Tables whose rows belong to a single run and go into that run's snapshot as-is.
 RUN_SCOPED_TABLES = ("market_snapshot", "estimates_snapshot", "validation_issues",
-                     "factor_scores", "valuations", "diagnosis")
+                     "universe_membership", "factor_scores", "valuations", "diagnosis")

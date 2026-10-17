@@ -162,8 +162,13 @@ class Store:
 
     # -- snapshots ----------------------------------------------------------
 
-    def snapshot(self, run_id: str, security_ids: list[str]) -> Path:
-        """Write the run's inputs and outputs to snapshots/{run_id}/*.parquet."""
+    def snapshot(self, run_id: str, security_ids: list[str],
+                 tables: tuple[str, ...] | None = None) -> Path:
+        """Write the run's inputs and outputs to snapshots/{run_id}/*.parquet.
+
+        `tables` limits the write to those tables, so a later stage can add its
+        outputs without re-copying inputs that may have changed since the run.
+        """
         out = self.snapshot_dir / snapshot_dirname(run_id)
         out.mkdir(parents=True, exist_ok=True)
         self.con.register("_universe", pd.DataFrame({"security_id": security_ids}))
@@ -174,6 +179,8 @@ class Store:
             for t in SECURITY_SCOPED_TABLES:
                 queries[t] = (f"SELECT * FROM {t} WHERE security_id IN "
                               f"(SELECT security_id FROM _universe)")
+            if tables is not None:
+                queries = {t: q for t, q in queries.items() if t in tables}
             for table, sql in queries.items():
                 path = (out / f"{table}.parquet").as_posix()
                 params = {"run_id": run_id} if "$run_id" in sql else {}

@@ -87,11 +87,68 @@ tax:
 # ---- Stage settings below are consumed from v1.1 onward ----
 
 universe:
-  min_price: 2.0
-  min_market_cap: 300_000_000
-  min_avg_volume: 50_000
+  # Size and liquidity are compared in this currency (market data is converted
+  # at the latest FX rate), so a CAD and a USD listing face the same bar.
+  currency: USD
+  min_price: 1.0              # trading currency
+  min_market_cap: 100_000_000
+  # Average daily traded value (3-month avg volume × price), not share count:
+  # 50k shares of a $0.40 explorer and of a $400 stock are not comparable.
+  min_avg_dollar_volume: 250_000
+  # Last quote older than this (days before the run) = halted or delisted.
+  max_quote_age_days: 7
   # D-010: excluded until sector models exist.
   excluded_sectors: [Financial Services, Real Estate]
 
 peers:
+  # D-002: industry peers from the full universe. With fewer peers the factor
+  # is ranked within the sector, then within the whole universe; the peer
+  # group used is stored with every score.
   min_peer_count: 5
+
+factors:
+  # D-013: a missing debt or minority-interest line is 0 when the balance sheet
+  # was reported (total_assets present). Debt-free companies otherwise get no EV.
+  missing_debt_is_zero: true
+  # Interest expense below this share of revenue is immaterial: coverage is
+  # ranked at the top instead of computed (schema §4).
+  immaterial_interest_pct_revenue: 0.001
+  # Window for insider buying and for share dilution.
+  insider_window_days: 182
+
+scoring:
+  # Composite = weighted mean of category scores; a category score is the mean
+  # of its available factor percentiles. Weights are renormalized over the
+  # categories a security has, but it needs at least `min_categories`.
+  category_weights:
+    quality: 0.30
+    value: 0.30
+    expectations: 0.15
+    price: 0.10
+    risk: 0.15
+  min_categories: 3
+  # A category counts only when at least this share of its factors is
+  # available (an explorer's "value" would otherwise be FCF yield alone,
+  # which measures cash burn, not cheapness).
+  min_factor_share: 0.5
+  # factor: [category, direction]. direction "high" = higher raw value scores
+  # higher. Factors with category "none" are computed and stored, not scored.
+  factors:
+    roic:                 [quality, high]
+    operating_margin:     [quality, high]
+    margin_stability:     [quality, low]
+    fcf_conversion:       [quality, high]
+    revenue_growth_3y:    [quality, high]
+    ev_ebit:              [value, low]
+    ev_ebitda:            [value, low]
+    ev_sales:             [value, low]
+    fcf_yield:            [value, high]
+    eps_revision_90d:     [expectations, high]
+    insider_net_buy_pct:  [expectations, high]
+    drawdown_52w:         [price, low]     # deeper drawdown = more pessimism priced in
+    momentum_12_1:        [none, high]     # D-003: timing only, used by monitor/
+    altman_z2:            [risk, high]
+    interest_coverage:    [risk, high]
+    net_debt_ebitda:      [risk, low]
+    cash_runway_years:    [risk, high]
+    dilution_1y:          [risk, low]

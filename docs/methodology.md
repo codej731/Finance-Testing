@@ -123,9 +123,63 @@ them back. The raw-response cache under `cache/raw/` only saves API calls.
 
 ---
 
-## 2. Scoring (v1.1)
+## 2. Universe and scoring (v1.1)
 
-*To be written with `screen/`.*
+`python -m screen.pipeline` (or `data.pipeline --score`) scores a data-stage
+run in place: outputs carry its `run_id` and are added to its snapshot.
+
+### 2.1 Universe (`screen/universe.py`)
+
+Knockouts, in order; the first failing one is stored in `universe_membership`:
+validation `drop` → excluded sector (D-010) → no market data → stale quote →
+no FX rate → price → market cap → average daily traded value. Market cap and
+traded value are converted to `universe.currency` at the latest rate (D-015).
+A missing vendor share count falls back to the latest reported balance sheet.
+
+### 2.2 Factors (`screen/factors.py`)
+
+Fundamentals are converted to the trading currency at each period-end rate,
+point-in-time as of the run date.
+
+- **Base period:** the latest TTM row when it is newer than the latest FY and
+  revenue, operating income, operating cash flow and capex are all present;
+  otherwise the latest FY. Flows and closing balances come from that one row.
+  Opening balances (average invested capital, dilution) come from the FY or
+  quarter ending within 20 days of one year earlier.
+- **Formulas:** schema §4. Growth and margin stability use fiscal years only.
+- **Exceptions:** missing debt / minority interest = 0 when a balance sheet
+  exists (D-013); ratios with a denominator ≤ 0 are null (D-014).
+- **Deliberate infinities:** interest coverage when interest is below
+  `factors.immaterial_interest_pct_revenue` of revenue or there is no debt;
+  cash runway when FCF ≥ 0. They rank at the top.
+- **Insider buying:** open-market buys minus sales by officers and directors
+  over `factors.insider_window_days`, as a share of market cap; null when the
+  vendor has no insider records for the company.
+
+| Category | Factors (direction) |
+|---|---|
+| Quality | ROIC ↑, operating margin ↑, margin stability ↓ (std. dev.), FCF conversion ↑, 3-yr revenue CAGR ↑ |
+| Value | EV/EBIT ↓, EV/EBITDA ↓, EV/sales ↓, FCF yield ↑ |
+| Expectations | 90-day EPS revision (0y, +1y) ↑, insider net buying ↑ |
+| Price | 52-week drawdown ↓ (deeper = more pessimism priced in) |
+| Risk | Altman Z'' ↑, interest coverage ↑, net debt/EBITDA ↓, cash runway ↑, 1-yr dilution ↓ |
+| Not scored | 12-1 momentum (timing only, D-003) |
+
+### 2.3 Scores (`screen/score.py`)
+
+- Each factor is ranked within the industry when at least
+  `peers.min_peer_count` securities have a value, else the sector, else the
+  universe (D-016). Percentile = (rank − 1)/(n − 1), 1.0 = best, ties
+  averaged; nulls are not ranked and stay null.
+- Category score = mean of its factor percentiles, provided at least
+  `scoring.min_factor_share` of the category's factors are present.
+- Composite = weighted mean of category scores (`scoring.category_weights`),
+  renormalized over the categories present; null with fewer than
+  `scoring.min_categories`.
+- `factor_scores` stores every factor (raw value, peer group, peer count,
+  percentile), every `category:<name>` score and the `composite`, so any
+  ranking can be traced to its inputs. The outlier check (schema §6) runs on
+  the factor values and logs to `validation_issues`.
 
 ## 3. Diagnosis (v1.4)
 

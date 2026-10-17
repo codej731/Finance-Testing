@@ -141,3 +141,31 @@ def test_rerun_upserts_without_duplicates(cfg):
     assert len(store.read("securities")) == 3
     assert first.run_id != second.run_id
     assert len(store.read("run_log")) == 2
+
+
+def test_screen_after_ingest(cfg):
+    from screen.pipeline import run_screen
+
+    store = Store(cfg.resolve_path("paths.db"), cfg.resolve_path("paths.snapshots"))
+    ingest = _run(cfg, store)
+    fx = StaticFx({"USDCAD": 1.37})
+    result = run_screen(store, cfg, fx, ingest.run_id, as_of=AS_OF)
+
+    members = result.universe.set_index("security_id")
+    assert members.loc["XTSX:OLD", "reason"] == "validation: staleness"
+    assert set(members.index[members["passed"]]) == {"XNAS:TST", "XTSE:MINR"}
+
+    stored = store.read("factor_scores", "run_id = ?", [ingest.run_id])
+    assert {"composite", "roic", "category:quality"} <= set(stored["factor"])
+    assert set(stored["security_id"]) == {"XNAS:TST", "XTSE:MINR"}
+    # Fundamentals were converted to the trading currency before EV (MINR: USD → CAD).
+    minr = result.factors.set_index("security_id").loc["XTSE:MINR"]
+    assert minr["currency"] == "CAD"
+
+    snap = load_snapshot(cfg.resolve_path("paths.snapshots"), ingest.run_id)
+    assert len(snap["factor_scores"]) == len(stored)
+    assert len(snap["universe_membership"]) == 3
+
+    # Re-scoring the same run replaces, not appends.
+    run_screen(store, cfg, fx, ingest.run_id, as_of=AS_OF)
+    assert len(store.read("factor_scores", "run_id = ?", [ingest.run_id])) == len(stored)

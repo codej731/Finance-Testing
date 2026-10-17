@@ -128,7 +128,9 @@ The "corporate-action record" the share-count-jump check (§6) looks for.
 `run_id`, `security_id`, `check_name`, `severity` (`drop` / `warn` / `info`), `field`, `period_type`, `period_end`, `detail`. One row per failed check per run (§6).
 
 ### 2.7 Output tables
-**`factor_scores`** — `run_id`, `security_id`, `factor`, `raw_value`, `peer_group`, `peer_count`, `percentile`, plus one `composite` row per security.
+**`universe_membership`** — `run_id`, `security_id`, `passed`, `reason` (first failing knockout), `market_cap_ref`, `dollar_volume_ref` (in `universe.currency`).
+
+**`factor_scores`** — `run_id`, `security_id`, `factor`, `raw_value`, `peer_group` (`industry:…`, `sector:…` or `universe`), `peer_count`, `percentile`, plus one `category:<name>` row per category and one `composite` row per security.
 
 **`valuations`** — `run_id`, `security_id`, `method` (`relative_peer`, `relative_history`, `reverse_dcf`, `dcf_bear`, `dcf_base`, `dcf_bull`), `value_per_share`, `implied_growth` (reverse DCF), `assumptions` (JSON), `currency`.
 
