@@ -159,9 +159,11 @@ def run_ingest(symbols: list[str], cfg: Config, *, store: Store | None = None,
     have_yahoo = set(pd.concat(fundamentals)["security_id"]) if fundamentals else set()
 
     if clients.yfinance is not None:
-        for symbol, sid in sid_by_symbol.items():
-            if sid in have_yahoo:
-                continue
+        missing = [(sym, sid) for sym, sid in sid_by_symbol.items() if sid not in have_yahoo]
+        if missing:
+            log.info("yfinance fallback: %d securities without yahooquery statements",
+                     len(missing))
+        for symbol, sid in missing:
             try:
                 statements, ccy = clients.yfinance.statements(symbol)
                 fundamentals.append(normalize_yfinance_statements(
@@ -170,9 +172,11 @@ def run_ingest(symbols: list[str], cfg: Config, *, store: Store | None = None,
                 errors.append(f"{symbol}: yfinance statements: {e}")
 
     if clients.edgar is not None:
-        for sid, cik in zip(securities["security_id"], securities["cik"]):
-            if not isinstance(cik, str):
-                continue
+        filers = [(sid, cik) for sid, cik in zip(securities["security_id"], securities["cik"])
+                  if isinstance(cik, str)]
+        for i, (sid, cik) in enumerate(filers):
+            if i % 200 == 0:
+                log.info("edgar: filer %d/%d", i + 1, len(filers))
             try:
                 fundamentals.append(normalize_edgar_companyfacts(
                     clients.edgar.companyfacts(cik), sid, retrieved_at))
