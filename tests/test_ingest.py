@@ -1,5 +1,7 @@
 from datetime import date, datetime
 
+import numpy as np
+
 import pandas as pd
 import pytest
 
@@ -109,6 +111,24 @@ def test_yahoo_total_debt_excludes_leases():
     raw["CurrentDebt"], raw["LongTermDebt"], raw["TotalDebt"] = 2e7, 5e7, 9e7
     df = normalize_yahoo_statements(raw, {"A": "XNAS:A"}, {"XNAS:A": "US"}, LAGS, NOW)
     assert _value(df, "total_debt", "FY", "2023-12-31")["value"] == 7e7
+
+
+def test_yahoo_total_debt_needs_long_term_debt():
+    # Yahoo sometimes has only CurrentDebt for a year; that is not total debt.
+    raw = fixtures.yahoo_financials("A", "USD", ["2023-12-31"], [])
+    raw["CurrentDebt"], raw["LongTermDebt"], raw["TotalDebt"] = 2e7, np.nan, 9e7
+    df = normalize_yahoo_statements(raw, {"A": "XNAS:A"}, {"XNAS:A": "US"}, LAGS, NOW)
+    assert _value(df, "total_debt", "FY", "2023-12-31")["value"] == 9e7
+
+
+def test_edgar_ignores_facts_dated_after_filing():
+    facts = fixtures.edgar_companyfacts()
+    facts["facts"]["us-gaap"]["SomeAssumption"] = {"units": {"pure": [
+        {"val": 0.05, "start": "2027-01-01", "end": "2027-12-31", "filed": "2024-11-15",
+         "form": "10-K", "accn": "A-24K"}]}}
+    df = normalize_edgar_companyfacts(facts, "XNAS:TST", NOW)
+    assert df["period_end"].max() == date(2024, 9, 30)
+    assert _value(df, "shares_outstanding", "FY", "2024-09-30")["value"] == 1_000_000
 
 
 def test_yahoo_statements_cash_falls_back_to_second_name():

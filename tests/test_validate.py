@@ -18,6 +18,8 @@ def panel(*rows):
         if f not in df.columns:
             df[f] = np.nan
     df["period_end"] = pd.to_datetime(df["period_end"]).dt.date
+    if "available_date" not in df.columns:
+        df["available_date"] = df["period_end"]
     return df
 
 
@@ -35,6 +37,14 @@ def test_staleness():
                {"security_id": "B", "period_type": "FY", "period_end": "2024-12-31"})
     out = check_staleness(fy, ["A", "B", "C"], date(2025, 1, 31), 15)
     assert set(out["security_id"]) == {"A", "C"} and (out["severity"] == "drop").all()
+
+
+def test_staleness_by_region():
+    fy = panel({"security_id": "V", "period_type": "FY", "period_end": "2025-06-30"},
+               {"security_id": "T", "period_type": "FY", "period_end": "2025-06-30"})
+    limits = {"US": 15, "TSX": 15, "TSXV": 16}
+    out = check_staleness(fy, ["V", "T"], date(2026, 10, 17), limits, {"V": "TSXV", "T": "TSX"})
+    assert list(out["security_id"]) == ["T"]  # TSX-V FY2026 not due until Oct 28
 
 
 def test_balance_identity_warns():
@@ -64,6 +74,15 @@ def test_share_jump_explained_by_split():
                "shares_outstanding": 200})
     assert len(check_share_jumps(p, 0.5)) == 1
     split = pd.DataFrame({"security_id": ["A"], "date": [date(2024, 8, 1)]})
+    assert check_share_jumps(p, 0.5, split).empty
+
+
+def test_share_jump_explained_by_split_before_filing():
+    p = panel({"security_id": "A", "period_type": "FY", "period_end": "2009-12-31",
+               "available_date": date(2010, 2, 20), "shares_outstanding": 100},
+              {"security_id": "A", "period_type": "FY", "period_end": "2010-12-31",
+               "available_date": date(2011, 2, 25), "shares_outstanding": 200})
+    split = pd.DataFrame({"security_id": ["A"], "date": [date(2011, 2, 1)]})
     assert check_share_jumps(p, 0.5, split).empty
 
 

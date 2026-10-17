@@ -251,7 +251,7 @@ Run on every ingest; failures are logged to the run and, if severe, drop the sec
 | Check | Rule | Severity |
 |---|---|---|
 | **Currency mismatch** | `trading_currency ≠ reporting_currency` → convert fundamentals at the period-end FX rate before computing EV or multiples (common for TSX miners reporting in USD) | Must handle |
-| **Staleness** | Latest FY `period_end` older than 15 months | Drop |
+| **Staleness** | Latest FY `period_end` older than 15 months (US, TSX) / 16 months (TSX-V, whose annual filings are due 120 days after year-end) | Drop |
 | **Balance identity** | `abs(total_assets − total_liabilities − total_equity − minority_interest) / total_assets > 2%` | Warn |
 | **Sign sanity** | `revenue < 0`, `total_assets ≤ 0`, `shares_outstanding ≤ 0` | Drop |
 | **Share count jump** | Shares change > 50% between periods without a corporate-action record | Warn |

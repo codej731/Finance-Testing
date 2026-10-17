@@ -11,7 +11,7 @@ from datetime import date
 
 import pandas as pd
 
-from data.schema import SOURCES, TABLES
+from data.schema import SOURCES, TABLES, availability_region
 from data.transform import FxProvider, align_period_ends, fundamentals_panel
 
 ISSUE_COLUMNS = [c for c in TABLES["validation_issues"].column_names if c != "run_id"]
@@ -70,16 +70,21 @@ def check_currency(securities: pd.DataFrame, long: pd.DataFrame,
 
 
 def check_staleness(fy: pd.DataFrame, security_ids: list[str], as_of: date,
-                    months: int) -> pd.DataFrame:
-    cutoff = (pd.Timestamp(as_of) - pd.DateOffset(months=months)).date()
+                    months: int | dict[str, int],
+                    regions: dict[str, str] | None = None) -> pd.DataFrame:
+    """Latest FY older than `months`. `months` may be a {region: months} map, since
+    filing deadlines differ (TSX-V annual statements are due 120 days after year-end)."""
     latest = fy.groupby("security_id")["period_end"].max()
     issues = []
     for sid in security_ids:
+        limit = (months.get((regions or {}).get(sid, "US"), max(months.values()))
+                 if isinstance(months, dict) else months)
+        cutoff = (pd.Timestamp(as_of) - pd.DateOffset(months=limit)).date()
         if sid not in latest.index:
             issues.append(_issue(sid, "staleness", DROP, "no FY fundamentals"))
         elif pd.Timestamp(latest[sid]).date() < cutoff:
             issues.append(_issue(sid, "staleness", DROP,
-                                 f"latest FY {latest[sid]} older than {months} months",
+                                 f"latest FY {latest[sid]} older than {limit} months",
                                  period_type="FY", period_end=latest[sid]))
     return _frame(issues)
 
@@ -124,7 +129,8 @@ def check_sign_sanity(panel: pd.DataFrame) -> pd.DataFrame:
 def check_share_jumps(panel: pd.DataFrame, threshold: float,
                       corporate_actions: pd.DataFrame | None = None) -> pd.DataFrame:
     """Share count moving more than `threshold` between consecutive periods with
-    no recorded corporate action in between."""
+    no recorded corporate action in between. An action up to the period's
+    availability date counts: cover-page share counts are dated at filing."""
     issues = []
     actions = corporate_actions if corporate_actions is not None else pd.DataFrame(
         columns=["security_id", "date"])
@@ -132,6 +138,7 @@ def check_share_jumps(panel: pd.DataFrame, threshold: float,
             ["security_id", "period_type"]):
         grp = grp.sort_values("period_end")
         dates = list(pd.to_datetime(grp["period_end"]))
+        known = list(pd.to_datetime(grp["available_date"]).fillna(pd.Series(dates, index=grp.index)))
         shares = list(grp["shares_outstanding"])
         sid_actions = pd.to_datetime(actions.loc[actions["security_id"] == sid, "date"])
         for i in range(1, len(grp)):
@@ -141,7 +148,8 @@ def check_share_jumps(panel: pd.DataFrame, threshold: float,
             change = cur / prev - 1
             if abs(change) <= threshold:
                 continue
-            explained = ((sid_actions > dates[i - 1]) & (sid_actions <= dates[i])).any()
+            window_end = max(dates[i], known[i])
+            explained = ((sid_actions > dates[i - 1]) & (sid_actions <= window_end)).any()
             if not explained:
                 issues.append(_issue(sid, "share_count_jump", WARN,
                                      f"shares changed {change:+.0%} with no corporate action",
@@ -225,7 +233,9 @@ def validate(securities: pd.DataFrame, long: pd.DataFrame, as_of: date, cfg,
     both = pd.concat([fy, q], ignore_index=True)
     checks = [
         check_currency(securities, long, fx),
-        check_staleness(fy, sids, as_of, cfg.get("validation.staleness_months", 15)),
+        check_staleness(fy, sids, as_of, cfg.get("validation.staleness_months", 15),
+                        dict(zip(securities["security_id"],
+                                 securities["exchange"].map(availability_region)))),
         check_balance_identity(both, cfg.get("validation.balance_identity_tolerance", 0.02)),
         check_sign_sanity(both),
         check_share_jumps(both, cfg.get("validation.share_jump_threshold", 0.5),

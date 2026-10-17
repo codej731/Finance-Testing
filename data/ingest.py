@@ -379,7 +379,9 @@ def _edgar_facts(companyfacts: dict, tag: str, unit_kind: str) -> pd.DataFrame:
     df = pd.DataFrame(units[unit])
     if df.empty:
         return df
-    df = df[df["form"].isin(EDGAR_FORMS)].copy()
+    # A filing cannot report actuals for a period ending after it was filed;
+    # such facts are assumptions (e.g. a 2027 health-care cost trend rate).
+    df = df[df["form"].isin(EDGAR_FORMS) & (df["end"] <= df["filed"])].copy()
     if "start" not in df.columns:
         df["start"] = None
     df["unit"] = unit
@@ -400,7 +402,8 @@ def _edgar_calendar(companyfacts: dict) -> tuple[set[date], set[date], dict[str,
     for name, body in (_get(companyfacts, "facts", "us-gaap") or {}).items():
         for facts in (body.get("units") or {}).values():
             for f in facts:
-                if f.get("form") not in EDGAR_FORMS or not f.get("start"):
+                if (f.get("form") not in EDGAR_FORMS or not f.get("start")
+                        or f["end"] > f.get("filed", "")):
                     continue
                 start, end = _date(f["start"]), _date(f["end"])
                 n = _quarters_in((end - start).days)

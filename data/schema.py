@@ -107,7 +107,7 @@ FIELDS: dict[str, FieldDef] = {f.name: f for f in [
     # us-gaap LongTermDebt already includes the current portion, and DebtCurrent
     # already includes short-term borrowings.
     FieldDef("total_debt", "balance", "stock",
-             yahoo=_alts(("?CurrentDebt", "?LongTermDebt"), "TotalDebt"),
+             yahoo=_alts(("LongTermDebt", "?CurrentDebt"), "TotalDebt"),
              xbrl=_alts(("us-gaap:LongTermDebtNoncurrent", "us-gaap:DebtCurrent"),
                         ("us-gaap:LongTermDebtNoncurrent", "us-gaap:LongTermDebtCurrent",
                          "?us-gaap:CommercialPaper", "?us-gaap:ShortTermBorrowings"),

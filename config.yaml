@@ -47,7 +47,9 @@ fx:
   allow_static_fallback: false
 
 validation:
-  staleness_months: 15
+  # Drop when the latest FY is older than this (by listing region; TSX-V
+  # annual statements are due 120 days after year-end, US/TSX 90).
+  staleness_months: {US: 15, TSX: 15, TSXV: 16}
   balance_identity_tolerance: 0.02
   share_jump_threshold: 0.50
   # Completeness knockout: at least `min_required_fields` of these must be
