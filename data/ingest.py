@@ -530,10 +530,10 @@ def _edgar_tag_series(companyfacts: dict, tag: str, field: str, fy_ends: set[dat
             .drop_duplicates(["period_type", "period_end"], keep="first"))
 
 
-def _edgar_combine(parts: list[tuple[pd.DataFrame, bool]]) -> pd.DataFrame | None:
-    """Sum tag series period by period. Required parts must all be present for a
-    period; optional parts are added where reported."""
-    required = [p for p, optional in parts if not optional]
+def _edgar_combine(parts: list[tuple[pd.DataFrame, bool, int]]) -> pd.DataFrame | None:
+    """Sum (or subtract, sign −1) tag series period by period. Required parts must
+    all be present for a period; optional parts are applied where reported."""
+    required = [p for p, optional, _ in parts if not optional]
     if any(p.empty for p in required):
         return None
     if required:
@@ -542,13 +542,14 @@ def _edgar_combine(parts: list[tuple[pd.DataFrame, bool]]) -> pd.DataFrame | Non
             index = index.intersection(p.index)
     else:
         index = parts[0][0].index
-        for p, _ in parts[1:]:
+        for p, _, _ in parts[1:]:
             index = index.union(p.index)
     if index.empty:
         return None
-    frames = [p.reindex(index) for p, _ in parts]
+    frames = [p.reindex(index) for p, _, _ in parts]
+    signed = [f["value"] * sign for f, (_, _, sign) in zip(frames, parts)]
     return pd.DataFrame({
-        "value": pd.concat([f["value"] for f in frames], axis=1).sum(axis=1, min_count=1),
+        "value": pd.concat(signed, axis=1).sum(axis=1, min_count=1),
         "filed": pd.concat([pd.to_datetime(f["filed"]) for f in frames], axis=1)
                    .max(axis=1).dt.date,
         "unit": pd.concat([f["unit"] for f in frames], axis=1).bfill(axis=1).iloc[:, 0],
@@ -565,8 +566,8 @@ def normalize_edgar_companyfacts(companyfacts: dict, security_id: str,
         for rank, alternative in enumerate(f.xbrl):
             combined = _edgar_combine(
                 [(_edgar_tag_series(companyfacts, tag, name, fy_ends, period_ends, accn_end)
-                  .set_index(["period_type", "period_end"]), optional)
-                 for tag, optional in map(parse_component, alternative)])
+                  .set_index(["period_type", "period_end"]), optional, sign)
+                 for tag, optional, sign in map(parse_component, alternative)])
             if combined is None:
                 continue
             combined["rank"] = rank

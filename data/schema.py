@@ -31,7 +31,7 @@ class FieldDef:
     # Source mappings: alternatives in priority order. Each alternative is a
     # tuple of components that are summed. Every component must be present
     # unless prefixed with "?" (optional: added when reported), and at least
-    # one component must be present. yfinance uses the yahooquery names with
+    # one component must be present. A "-" prefix subtracts the component. yfinance uses the yahooquery names with
     # spaces.
     yahoo: tuple[tuple[str, ...], ...] = ()
     xbrl: tuple[tuple[str, ...], ...] = ()
@@ -47,6 +47,7 @@ FIELDS: dict[str, FieldDef] = {f.name: f for f in [
     FieldDef("revenue", "income", "flow", yahoo=_alts("TotalRevenue"),
              xbrl=_alts("us-gaap:Revenues",
                         "us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax",
+                        "us-gaap:RevenueFromContractWithCustomerIncludingAssessedTax",
                         "us-gaap:SalesRevenueNet"),
              description="Total revenue"),
     FieldDef("cost_of_revenue", "income", "flow", yahoo=_alts("CostOfRevenue"),
@@ -85,7 +86,11 @@ FIELDS: dict[str, FieldDef] = {f.name: f for f in [
                         ("us-gaap:CashAndCashEquivalentsAtCarryingValue",
                          "?us-gaap:ShortTermInvestments",
                          "?us-gaap:MarketableSecuritiesCurrent",
-                         "?us-gaap:AvailableForSaleSecuritiesDebtSecuritiesCurrent")),
+                         "?us-gaap:AvailableForSaleSecuritiesDebtSecuritiesCurrent"),
+                        # Last resort, includes restricted cash (cash-flow statement total).
+                        ("us-gaap:CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents",
+                         "?us-gaap:ShortTermInvestments",
+                         "?us-gaap:MarketableSecuritiesCurrent")),
              description="Cash + short-term investments"),
     FieldDef("receivables", "balance", "stock", yahoo=_alts("AccountsReceivable"),
              xbrl=_alts("us-gaap:AccountsReceivableNetCurrent")),
@@ -117,7 +122,9 @@ FIELDS: dict[str, FieldDef] = {f.name: f for f in [
     FieldDef("minority_interest", "balance", "stock", yahoo=_alts("MinorityInterest"),
              xbrl=_alts("us-gaap:MinorityInterest")),
     FieldDef("total_equity", "balance", "stock", yahoo=_alts("StockholdersEquity"),
-             xbrl=_alts("us-gaap:StockholdersEquity"),
+             xbrl=_alts("us-gaap:StockholdersEquity",
+                        ("us-gaap:StockholdersEquityIncludingPortionAttributableTo"
+                         "NoncontrollingInterest", "?-us-gaap:MinorityInterest")),
              description="Common shareholders' equity"),
     FieldDef("retained_earnings", "balance", "stock", yahoo=_alts("RetainedEarnings"),
              xbrl=_alts("us-gaap:RetainedEarningsAccumulatedDeficit")),
@@ -157,9 +164,13 @@ def yfinance_name(yahoo_name: str) -> str:
     return re.sub(r"(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])", " ", yahoo_name)
 
 
-def parse_component(component: str) -> tuple[str, bool]:
-    """'?us-gaap:CommercialPaper' → ('us-gaap:CommercialPaper', True)."""
-    return (component[1:], True) if component.startswith("?") else (component, False)
+def parse_component(component: str) -> tuple[str, bool, int]:
+    """'?-us-gaap:MinorityInterest' → ('us-gaap:MinorityInterest', optional=True, sign=-1).
+    "?" marks an optional component, "-" one that is subtracted."""
+    optional = component.startswith("?")
+    component = component.lstrip("?")
+    sign = -1 if component.startswith("-") else 1
+    return component.lstrip("-"), optional, sign
 
 
 def resolve_alternatives(lookup, alternatives: tuple[tuple[str, ...], ...]) -> float | None:
@@ -167,13 +178,13 @@ def resolve_alternatives(lookup, alternatives: tuple[tuple[str, ...], ...]) -> f
     for alternative in alternatives:
         total, found = 0.0, False
         for component in alternative:
-            name, optional = parse_component(component)
+            name, optional, sign = parse_component(component)
             value = lookup(name)
             if value is None:
                 if optional:
                     continue
                 break
-            total += value
+            total += sign * value
             found = True
         else:
             if found:

@@ -73,6 +73,12 @@ def test_resolve_alternatives(values, expected):
     assert resolve_alternatives(values.get, alts) == expected
 
 
+def test_subtracted_component():
+    alts = (("A", "?-B"),)
+    assert resolve_alternatives({"A": 10.0, "B": 3.0}.get, alts) == 7.0
+    assert resolve_alternatives({"A": 10.0}.get, alts) == 10.0
+
+
 def test_all_optional_alternative_needs_one_value():
     assert resolve_alternatives({}.get, (("?A", "?B"),)) is None
     assert resolve_alternatives({"B": 2}.get, (("?A", "?B"),)) == 2
@@ -177,3 +183,8 @@ def test_currency_conversion_without_rate_is_null():
 def test_panel_requires_fx_for_conversion():
     with pytest.raises(ValueError):
         fundamentals_panel(frame(row("X", "revenue", "FY", "2024-12-31", 1)), currency="CAD")
+
+
+def test_empty_panel_keeps_all_columns():
+    wide = fundamentals_panel(frame(), "Q")
+    assert "shares_outstanding" in wide.columns and wide.empty

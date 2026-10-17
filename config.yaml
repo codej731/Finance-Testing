@@ -112,6 +112,9 @@ universe:
   max_quote_age_days: 7
   # D-010: excluded until sector models exist.
   excluded_sectors: [Financial Services, Real Estate]
+  # Company country per Yahoo (headquarters). The thesis is North American
+  # companies; US listings of foreign companies are knocked out. [] = any.
+  countries: [United States, Canada]
 
 screen:
   # Refuse to score a data run older than this (prices and estimates move);

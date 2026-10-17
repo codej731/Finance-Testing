@@ -195,6 +195,13 @@ def test_prefilter_limits_full_fetch(cfg):
     assert len(store.read("market_snapshot")) == 3          # quotes kept for everyone
     assert set(store.read("validation_issues")["security_id"]) <= {"XNAS:TST"}
 
+    # Scoring copes with quote-only securities that lack a share count.
+    from screen.pipeline import run_screen
+    store.con.execute("UPDATE market_snapshot SET shares_outstanding = NULL "
+                      "WHERE security_id <> 'XNAS:TST'")
+    screened = run_screen(store, cfg, clients.fx, result.run_id, as_of=AS_OF)
+    assert len(screened.universe) == 3
+
 
 def test_store_adds_new_columns_to_old_databases(tmp_path):
     import duckdb

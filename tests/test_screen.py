@@ -206,6 +206,29 @@ def test_universe_knockouts():
     assert out.loc["H", "reason"] == "not common equity: ETF"
 
 
+def test_universe_countries_and_duplicate_listings():
+    secs = pd.DataFrame({
+        "security_id": ["XTSE:T", "XNYS:TU", "XNYS:AKO", "XNAS:AAPL", "XTSE:AAPL"],
+        "name": ["TELUS Corporation", "TELUS Corp.", "Embotelladora Andina S.A.",
+                 "Apple Inc.", "Apple Inc. CDR"],
+        "exchange": ["TSX", "NYSE", "NYSE", "NASDAQ", "TSX"],
+        "country": ["Canada", "Canada", "Chile", "United States", "United States"],
+        "sector": ["Communication Services"] * 2 + ["Consumer Defensive", "Technology",
+                                                      "Technology"]})
+    market = pd.DataFrame({
+        "security_id": secs["security_id"], "currency": ["CAD", "USD", "USD", "USD", "CAD"],
+        "as_of": AS_OF, "price": 20.0, "market_cap": 2e10, "shares_outstanding": 1e9,
+        # The NYSE line trades more, but TELUS is Canadian: keep the TSX listing.
+        "avg_volume_3m": [1e6, 5e6, 1e6, 5e7, 1e5]})
+    out = apply_universe(secs, market, pd.DataFrame(columns=["security_id", "check_name",
+                                                             "severity"]),
+                         StaticFx({"USDCAD": 1.4}), AS_OF, CFG).set_index("security_id")
+    assert out.loc["XTSE:T", "passed"]
+    assert out.loc["XNYS:TU", "reason"] == "duplicate listing of XTSE:T"
+    assert out.loc["XNYS:AKO", "reason"] == "outside countries: Chile"
+    assert out.loc["XNAS:AAPL", "passed"]  # different normalized name from the CDR
+
+
 # --- scoring --------------------------------------------------------------
 
 def _secs(n_gold=5, n_silver=2):

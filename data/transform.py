@@ -176,7 +176,7 @@ def to_wide(long: pd.DataFrame) -> pd.DataFrame:
     date the whole row was known.
     """
     if long.empty:
-        return pd.DataFrame(columns=META_COLUMNS)
+        return pd.DataFrame(columns=META_COLUMNS + list(FIELDS))
     index = ["security_id", "period_type", "period_end"]
     values = long.pivot_table(index=index, columns="field", values="value", aggfunc="first")
     values.columns.name = None

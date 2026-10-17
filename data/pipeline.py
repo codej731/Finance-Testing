@@ -257,7 +257,8 @@ def main(argv: list[str] | None = None) -> None:
                         help="run the screen stage (universe, factors, scores) afterwards")
     parser.add_argument("--top", type=int, default=20, help="rows to print with --score")
     args = parser.parse_args(argv)
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
+                        datefmt="%H:%M:%S")
 
     cfg = load_config(args.config)
     store = Store(cfg.resolve_path("paths.db"), cfg.resolve_path("paths.snapshots"))

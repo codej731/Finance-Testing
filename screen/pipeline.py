@@ -23,7 +23,7 @@ from data.transform import FxProvider
 from data.validate import check_outliers
 from screen.factors import assign_segments, compute_factors
 from screen.score import ranking, score
-from screen.universe import apply_universe
+from screen.universe import apply_universe, knockout_summary
 
 
 @dataclass
@@ -72,9 +72,11 @@ def run_screen(store: Store, cfg: Config, fx: FxProvider, run_id: str | None = N
     missing = market["shares_outstanding"].isna()
     if missing.any():
         q = store.panel("Q", as_of=as_of, security_ids=list(market.loc[missing, "security_id"]))
-        latest = (q.dropna(subset=["shares_outstanding"]).sort_values("period_end")
-                  .groupby("security_id")["shares_outstanding"].last())
-        market.loc[missing, "shares_outstanding"] = market.loc[missing, "security_id"].map(latest)
+        if "shares_outstanding" in q.columns and not q.empty:
+            latest = (q.dropna(subset=["shares_outstanding"]).sort_values("period_end")
+                      .groupby("security_id")["shares_outstanding"].last())
+            market.loc[missing, "shares_outstanding"] = (
+                market.loc[missing, "security_id"].map(latest))
 
     universe = apply_universe(securities, market, issues, fx, as_of, cfg)
     members = list(universe.loc[universe["passed"], "security_id"])
@@ -114,10 +116,9 @@ def run_screen(store: Store, cfg: Config, fx: FxProvider, run_id: str | None = N
 def print_result(result: ScreenResult, top: int) -> None:
     u = result.universe
     print(f"run {result.run_id}: {int(u['passed'].sum())}/{len(u)} in universe")
-    knocked = u[~u["passed"]]
-    if not knocked.empty:
-        print("\nknocked out:")
-        print(knocked.set_index("security_id")["reason"].to_string())
+    if (~u["passed"]).any():
+        print("\nknocked out (details in universe_membership):")
+        print(knockout_summary(u).to_string())
     if not result.ranking.empty:
         cols = [c for c in ("name", "industry", "composite", "quality", "value",
                             "expectations", "price", "risk") if c in result.ranking.columns]
